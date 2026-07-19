@@ -179,6 +179,25 @@
             }
         }
 
+        // استخراج كل نص ملف PDF (كل الصفحات) ليصبح قابلاً للتحديد والتعديل والترجمة والحفظ
+        async function extractPdfText(dataUrl) {
+            try {
+                if (!window['pdfjsLib']) return '';
+                const pdf = await window['pdfjsLib'].getDocument(dataUrl).promise;
+                let fullText = '';
+                for (let i = 1; i <= pdf.numPages; i++) {
+                    const page = await pdf.getPage(i);
+                    const textContent = await page.getTextContent();
+                    const pageText = textContent.items.map(item => item.str).join(' ');
+                    fullText += `--- صفحة ${i} ---\n${pageText}\n\n`;
+                }
+                return fullText.trim();
+            } catch (err) {
+                console.error('تعذر استخراج نص ملف PDF:', err);
+                return '';
+            }
+        }
+
         function translateAuthError(err) {
             const code = err && err.code;
             const map = {
@@ -1012,7 +1031,7 @@
             const [currentCardIndex, setCurrentCardIndex] = useState(0);
             const [revealAnswer, setRevealAnswer] = useState(false);
 
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [isReviewing, managingDeck, isAddingCard, isAddingDeck, selectedDeck, decks.length]);
 
             // Statistics computation
             const stats = useMemo(() => {
@@ -1429,7 +1448,7 @@
         function BooksScreen({ completedLessons, setCompletedLessons, grammarStatus, setGrammarStatus, onAddStats, onBack }) {
             const [selectedLevel, setSelectedLevel] = useState(1);
             const [activeCourse, setActiveCourse] = useState(null);
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [selectedLevel, activeCourse]);
 
             // Toggle lesson status
             const toggleLesson = (courseId, lessonIndex) => {
@@ -1581,7 +1600,7 @@
             const [unitName, setUnitName] = useState('');
             const [wordText, setWordText] = useState('');
             const [wordClassification, setWordClassification] = useState('Noun');
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, []);
 
             // Toggle word checked boxes
             const toggleWordCheck = (unitId, wordId, boxIndex) => {
@@ -1971,6 +1990,64 @@
         }
 
         // بطاقة عرض ملف واحد بنمط "Document Card"
+        // عرض كل صفحات ملف PDF (وليس الأولى فقط) بشكل عمودي قابل للتمرير
+        function PdfPagesViewer({ dataUrl }) {
+            const containerRef = useRef(null);
+            const [status, setStatus] = useState('loading'); // loading | ready | error
+
+            useEffect(() => {
+                let cancelled = false;
+                async function renderAll() {
+                    setStatus('loading');
+                    try {
+                        if (!window['pdfjsLib']) { setStatus('error'); return; }
+                        const pdf = await window['pdfjsLib'].getDocument(dataUrl).promise;
+                        if (cancelled) return;
+                        const container = containerRef.current;
+                        if (!container) return;
+                        container.innerHTML = '';
+                        for (let i = 1; i <= pdf.numPages; i++) {
+                            const page = await pdf.getPage(i);
+                            const viewport = page.getViewport({ scale: 1.4 });
+                            const canvas = document.createElement('canvas');
+                            canvas.width = viewport.width;
+                            canvas.height = viewport.height;
+                            canvas.style.width = '100%';
+                            canvas.style.height = 'auto';
+                            canvas.style.display = 'block';
+                            canvas.style.marginBottom = '14px';
+                            canvas.style.borderRadius = '10px';
+                            canvas.style.border = '1px solid #e2e8f0';
+                            container.appendChild(canvas);
+                            await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+                            if (cancelled) return;
+                        }
+                        if (!cancelled) setStatus('ready');
+                    } catch (err) {
+                        console.error('تعذر عرض صفحات ملف PDF:', err);
+                        if (!cancelled) setStatus('error');
+                    }
+                }
+                renderAll();
+                return () => { cancelled = true; };
+            }, [dataUrl]);
+
+            return (
+                <div>
+                    {status === 'loading' && (
+                        <div class="flex items-center justify-center h-40 text-slate-400 text-xs gap-2">
+                            <div class="w-5 h-5 border-2 border-primary-500 border-t-transparent rounded-full animate-spin"></div>
+                            جارٍ تحميل كل صفحات الملف...
+                        </div>
+                    )}
+                    {status === 'error' && (
+                        <p class="text-xs text-red-500 text-center py-6">تعذر عرض هذا الملف كصفحات، جرب "فتح في نافذة كاملة" أو "تنزيل الملف" بالأسفل.</p>
+                    )}
+                    <div ref={containerRef} class="w-full max-h-[65vh] overflow-y-auto thin-scroll"></div>
+                </div>
+            );
+        }
+
         function DocumentCard({ file, onOpen, onDelete, onFinish, allowFinish }) {
             const kindMeta = {
                 text: { icon: 'file-text', label: 'نص', color: 'text-blue-500 bg-blue-50' },
@@ -2030,6 +2107,7 @@
             const [viewingFileId, setViewingFileId] = useState(null);
             const [isEditingText, setIsEditingText] = useState(false);
             const [editDraft, setEditDraft] = useState('');
+            const [pdfViewMode, setPdfViewMode] = useState('pages'); // pages | text (لملفات PDF فقط)
 
             const [unitName, setUnitName] = useState('');
             const [fileName, setFileName] = useState('');
@@ -2039,7 +2117,8 @@
             const [filePickStatus, setFilePickStatus] = useState('idle'); // idle | loading | ready | error
             const fileInputRef = useRef(null);
 
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [selectedUnitId, viewingFileId, isAddingUnit, isAddingFile, pdfViewMode, isEditingText, filePickStatus]);
+            useEffect(() => { setPdfViewMode('pages'); setIsEditingText(false); }, [viewingFileId]);
 
             // نشتق البيانات الحيّة دائماً من قائمة units بدل الاحتفاظ بنسخة قديمة منفصلة،
             // هذا يضمن أن أي ملف جديد أو تعديل يظهر فوراً دون الحاجة لإعادة فتح الصفحة
@@ -2091,8 +2170,11 @@
                 } else if (isPdf) {
                     reader.onload = async () => {
                         const dataUrl = reader.result;
-                        const thumb = await generatePdfThumbnail(dataUrl);
-                        setPickedFile({ kind: 'pdf', content: dataUrl, mime, thumbnail: thumb });
+                        const [thumb, extractedText] = await Promise.all([
+                            generatePdfThumbnail(dataUrl),
+                            extractPdfText(dataUrl)
+                        ]);
+                        setPickedFile({ kind: 'pdf', content: dataUrl, mime, thumbnail: thumb, extractedText });
                         setFilePickStatus('ready');
                     };
                     reader.readAsDataURL(file);
@@ -2112,8 +2194,8 @@
                 if (fileMode === 'type' && !fileTextContent.trim()) return;
 
                 const newFile = fileMode === 'upload'
-                    ? { id: Date.now().toString(), name: fileName, kind: pickedFile.kind, content: pickedFile.content, thumbnail: pickedFile.thumbnail || null, annotation: null }
-                    : { id: Date.now().toString(), name: fileName, kind: 'text', content: fileTextContent, thumbnail: null, annotation: null };
+                    ? { id: Date.now().toString(), name: fileName, kind: pickedFile.kind, content: pickedFile.content, thumbnail: pickedFile.thumbnail || null, extractedText: pickedFile.extractedText || null, annotation: null }
+                    : { id: Date.now().toString(), name: fileName, kind: 'text', content: fileTextContent, thumbnail: null, extractedText: null, annotation: null };
 
                 setUnits(prev => prev.map(u => u.id === selectedUnit.id ? { ...u, files: [...u.files, newFile] } : u));
 
@@ -2129,12 +2211,14 @@
                 alert('تم حفظ تعديلاتك على الملف بنجاح.');
             };
 
-            // حفظ التعديل على محتوى النص نفسه (كتابة/حذف داخل الملف)
+            // حفظ التعديل على محتوى النص نفسه (كتابة/حذف داخل الملف) - يدعم ملفات النص وملفات PDF (كنص مستخرج)
             const handleSaveTextEdit = () => {
+                const field = viewingFile.kind === 'pdf' ? 'extractedText' : 'content';
                 setUnits(prev => prev.map(u => {
                     if (u.id !== selectedUnit.id) return u;
-                    return { ...u, files: u.files.map(f => f.id === viewingFile.id ? { ...f, content: editDraft } : f) };
+                    return { ...u, files: u.files.map(f => f.id === viewingFile.id ? { ...f, [field]: editDraft } : f) };
                 }));
+                playHardClick();
                 setIsEditingText(false);
                 alert('تم حفظ التعديلات على نص الملف بنجاح.');
             };
@@ -2271,12 +2355,33 @@
                             )}
                             {viewingFile.kind === 'pdf' && (
                                 <div class="space-y-2">
-                                    <iframe src={viewingFile.content} class="w-full h-[65vh] rounded-xl border bg-slate-50"></iframe>
-                                    <div class="flex gap-2">
-                                        <button onClick={() => { const w = window.open(); w.document.write(`<iframe src="${viewingFile.content}" style="border:0;width:100%;height:100vh;"></iframe>`); }} class="flex-1 bg-slate-100 text-slate-700 text-xs px-4 py-2 rounded-lg font-bold">فتح في نافذة كاملة</button>
-                                        <a href={viewingFile.content} download={viewingFile.name} class="flex-1 text-center bg-primary-500 text-white text-xs px-4 py-2 rounded-lg font-bold">تنزيل الملف</a>
-                                    </div>
-                                    <p class="text-[10px] text-slate-400 text-center">لو ما ظهر الملف بالمعاينة أعلاه (يحصل أحياناً بمتصفح الجوال)، استخدم "فتح في نافذة كاملة" أو "تنزيل الملف".</p>
+                                    {viewingFile.extractedText && (
+                                        <div class="flex gap-2 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl w-fit mx-auto">
+                                            <button onClick={() => { setPdfViewMode('pages'); setIsEditingText(false); }} class={`px-4 py-1.5 rounded-lg text-xs font-bold ${pdfViewMode === 'pages' ? 'bg-white dark:bg-slate-700 shadow-sm text-primary-600' : 'text-slate-500'}`}>عرض الصفحات</button>
+                                            <button onClick={() => { setPdfViewMode('text'); setIsEditingText(false); }} class={`px-4 py-1.5 rounded-lg text-xs font-bold ${pdfViewMode === 'text' ? 'bg-white dark:bg-slate-700 shadow-sm text-primary-600' : 'text-slate-500'}`}>نص قابل للتعديل</button>
+                                        </div>
+                                    )}
+
+                                    {pdfViewMode === 'pages' && (
+                                        <>
+                                            <PdfPagesViewer dataUrl={viewingFile.content} />
+                                            <div class="flex gap-2">
+                                                <button onClick={() => { const w = window.open(); w.document.write(`<iframe src="${viewingFile.content}" style="border:0;width:100%;height:100vh;"></iframe>`); }} class="flex-1 bg-slate-100 text-slate-700 text-xs px-4 py-2 rounded-lg font-bold">فتح في نافذة كاملة</button>
+                                                <a href={viewingFile.content} download={viewingFile.name} class="flex-1 text-center bg-primary-500 text-white text-xs px-4 py-2 rounded-lg font-bold">تنزيل الملف</a>
+                                            </div>
+                                        </>
+                                    )}
+
+                                    {pdfViewMode === 'text' && !isEditingText && (
+                                        <p class="text-base leading-relaxed text-slate-700 dark:text-slate-200 select-text notebook-paper p-4 rounded-xl whitespace-pre-wrap">{viewingFile.extractedText}</p>
+                                    )}
+                                    {pdfViewMode === 'text' && isEditingText && (
+                                        <textarea
+                                            value={editDraft}
+                                            onChange={(e) => setEditDraft(e.target.value)}
+                                            class="w-full h-64 text-base leading-relaxed text-slate-700 notebook-paper p-4 rounded-xl border border-primary-300 focus:outline-none focus:ring-2 focus:ring-primary-400"
+                                        />
+                                    )}
                                 </div>
                             )}
                             {viewingFile.kind === 'other' && (
@@ -2286,14 +2391,14 @@
                                 </div>
                             )}
 
-                            {viewingFile.kind === 'text' && (
+                            {(viewingFile.kind === 'text' || (viewingFile.kind === 'pdf' && pdfViewMode === 'text')) && (
                                 <div class="flex flex-wrap gap-2">
                                     {!isEditingText && (
                                         <>
                                             <button onClick={handleTranslateSelection} class="flex items-center gap-1.5 bg-blue-50 text-blue-600 px-4 py-2 rounded-xl text-xs font-bold">
                                                 <i data-lucide="languages" class="w-4 h-4"></i> ترجمة الجزء المحدد
                                             </button>
-                                            <button onClick={() => { setEditDraft(viewingFile.content); setIsEditingText(true); }} class="flex items-center gap-1.5 bg-slate-100 text-slate-700 px-4 py-2 rounded-xl text-xs font-bold">
+                                            <button onClick={() => { setEditDraft(viewingFile.kind === 'pdf' ? viewingFile.extractedText : viewingFile.content); setIsEditingText(true); }} class="flex items-center gap-1.5 bg-slate-100 text-slate-700 px-4 py-2 rounded-xl text-xs font-bold">
                                                 <i data-lucide="pencil" class="w-4 h-4"></i> تعديل النص (كتابة/حذف)
                                             </button>
                                         </>
@@ -2388,7 +2493,7 @@
 
             const [sourceName, setSourceName] = useState('');
             const [sourceUrl, setSourceUrl] = useState('');
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [isAddingSource, section]);
 
             const handleSaveSource = () => {
                 if (!sourceName.trim() || isAddingSource === null) return;
@@ -2490,7 +2595,7 @@
             const [isAnalysing, setIsAnalysing] = useState(false);
             const [analysisResult, setAnalysisResult] = useState(null);
 
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [isAddingTopic, activeWriteTopic, writeMode, isAnalysing, analysisResult, suggestions.length]);
 
             const handleCreateTopic = (titleToUse = null) => {
                 const finalTitle = titleToUse || topicTitle;
@@ -2513,6 +2618,25 @@
                 if (!newSuggestionText.trim()) return;
                 setSuggestions([...suggestions, { id: Date.now().toString(), text: newSuggestionText }]);
                 setNewSuggestionText('');
+            };
+
+            const handleDeleteSuggestion = () => {
+                if (suggestions.length === 0) return;
+                if (!confirm('حذف هذا الاقتراح؟')) return;
+                playHardClick();
+                const idToDelete = suggestions[suggestionIndex].id;
+                setSuggestions(prev => prev.filter(s => s.id !== idToDelete));
+                setSuggestionIndex(0);
+            };
+
+            const handleDeleteTopic = (topicId) => {
+                if (!confirm('حذف هذا الموضوع؟ سيُحذف كل ما كتبته فيه.')) return;
+                playHardClick();
+                setWritingTopics(prev => prev.filter(t => t.id !== topicId));
+                if (activeWriteTopic && activeWriteTopic.id === topicId) {
+                    setActiveWriteTopic(null);
+                    setWriteMode(null);
+                }
             };
 
             const handleAcceptSuggestion = () => {
@@ -2580,13 +2704,16 @@
                     {/* Topics Grid Cards */}
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {topics.map(topic => (
-                            <div key={topic.id} class="bg-white border border-slate-100 p-5 rounded-2xl flex justify-between items-center">
-                                <div>
-                                    <h4 class="font-bold text-slate-800">{topic.title}</h4>
+                            <div key={topic.id} class="bg-white border border-slate-100 p-5 rounded-2xl flex justify-between items-center gap-2">
+                                <div class="flex-1 min-w-0">
+                                    <h4 class="font-bold text-slate-800 truncate">{topic.title}</h4>
                                     <p class="text-xs text-slate-400 mt-1">المدة المفترضة: {topic.duration} دقيقة</p>
                                 </div>
-                                <button onClick={() => openTopic(topic)} class="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-4 py-2 rounded-xl font-bold">
+                                <button onClick={() => openTopic(topic)} class="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-4 py-2 rounded-xl font-bold shrink-0">
                                     كتابة الآن
+                                </button>
+                                <button onClick={() => handleDeleteTopic(topic.id)} title="حذف الموضوع" class="text-slate-300 hover:text-red-500 shrink-0">
+                                    <i data-lucide="trash-2" class="w-4 h-4"></i>
                                 </button>
                             </div>
                         ))}
@@ -2619,6 +2746,9 @@
                                                 </div>
                                                 <button onClick={() => { playSoftClick(); setSuggestionIndex(i => (i + 1) % suggestions.length); }} class="p-2 bg-white border rounded-full">
                                                     <i data-lucide="chevron-left" class="w-4 h-4"></i>
+                                                </button>
+                                                <button onClick={handleDeleteSuggestion} title="حذف هذا الاقتراح" class="p-2 bg-red-50 text-red-500 border border-red-100 rounded-full">
+                                                    <i data-lucide="trash-2" class="w-4 h-4"></i>
                                                 </button>
                                             </div>
                                             <button onClick={handleAcceptSuggestion} class="w-full flex items-center justify-center gap-2 bg-emerald-500 text-white py-2.5 rounded-xl font-bold text-xs">
@@ -2755,7 +2885,7 @@
             const [unitName, setUnitName] = useState('');
             const [lessonName, setLessonName] = useState('');
             const [lessonUrl, setLessonUrl] = useState('');
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, []);
 
             const handleSaveSource = () => {
                 if (!sourceName.trim() || isAddingSource === null) return;
@@ -3001,7 +3131,7 @@
             const [isEditing, setIsEditing] = useState(false);
             const [name, setName] = useState(src?.name || '');
             const [url, setUrl] = useState(src?.url || '');
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [isEditing]);
 
             const save = () => {
                 if (!name.trim()) return;
@@ -3043,7 +3173,7 @@
         function SpeakingScreen({ sources, setSources, suggestions, setSuggestions, onAddStats, onBack }) {
             const [newSuggestionText, setNewSuggestionText] = useState('');
             const [browseIndex, setBrowseIndex] = useState(0);
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [browseIndex]);
 
             const pending = suggestions.filter(s => !s.done);
             const completed = suggestions.filter(s => s.done);
@@ -3138,7 +3268,7 @@
             const [unitName, setUnitName] = useState('');
             const [lessonName, setLessonName] = useState('');
             const [lessonUrl, setLessonUrl] = useState('');
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, []);
 
             const updateSource = (idx, value) => {
                 const next = [...sources];
@@ -3299,7 +3429,7 @@
             const [part2Audio, setPart2Audio] = useState(null);
 
             const fileInputRef = useRef(null);
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [isAdding, part1Type, part1Image, part2Mode, elements.length]);
 
             const handlePart1ImagePick = (e) => {
                 const file = e.target.files[0];
@@ -3315,19 +3445,33 @@
             };
 
             const handleCreateElement = () => {
-                if (!part1Text.trim() && !part1Image) return;
+                // يسمح بالحفظ لو تم تعبئة أي جزء (نص/صورة بالقسم الأول، أو اسم/رابط/تسجيل بالقسم الثاني)
+                const hasPart1 = part1Text.trim() || part1Image;
+                const hasPart2 = part2Name.trim() || part2Link.trim() || part2Audio;
+                if (!hasPart1 && !hasPart2) {
+                    alert('أضف نصاً أو صورة أو رابطاً على الأقل قبل الحفظ.');
+                    return;
+                }
+                // تطبيع الرابط تلقائياً (إضافة https:// إذا كان الرابط بدون بروتوكول) حتى يعمل عند الضغط عليه
+                let normalizedLink = part2Link.trim();
+                if (normalizedLink && !/^https?:\/\//i.test(normalizedLink)) {
+                    normalizedLink = 'https://' + normalizedLink;
+                }
                 const newElem = {
                     id: Date.now().toString(),
-                    part1: { type: part1Type, value: part1Type === 'image' ? part1Image : part1Text },
-                    part2: { name: part2Name, mode: part2Mode, value: part2Mode === 'audio' ? part2Audio : part2Link },
+                    part1: { type: part1Type, value: part1Type === 'image' ? part1Image : (part1Text.trim() || (part2Name.trim() ? part2Name.trim() : 'عنصر بدون عنوان')) },
+                    part2: { name: part2Name, mode: part2Mode, value: part2Mode === 'audio' ? part2Audio : normalizedLink },
                     date: new Date().toLocaleDateString()
                 };
                 setElements([newElem, ...elements]);
+                playHardClick();
                 resetForm();
                 setIsAdding(false);
             };
 
             const handleDeleteElement = (id) => {
+                if (!confirm('حذف هذا العنصر؟')) return;
+                playHardClick();
                 setElements(elements.filter(e => e.id !== id));
             };
 
@@ -3406,7 +3550,7 @@
                                         <button onClick={() => setPart2Mode('audio')} class={`flex-1 py-2 rounded-lg text-xs font-bold ${part2Mode === 'audio' ? 'bg-primary-500 text-white' : 'bg-white text-slate-600 border'}`}>تسجيل صوتي</button>
                                     </div>
                                     {part2Mode === 'link' ? (
-                                        <input type="text" placeholder="الرابط..." value={part2Link} onChange={(e) => setPart2Link(e.target.value)} class="w-full border p-2.5 rounded-lg text-sm" />
+                                        <input type="text" placeholder="الرابط... (مثال: example.com)" value={part2Link} onChange={(e) => setPart2Link(e.target.value)} spellCheck="false" autoCapitalize="off" autoCorrect="off" class="w-full border p-2.5 rounded-lg text-sm" dir="ltr" />
                                     ) : (
                                         <MediaAttachments image={null} onImageChange={() => {}} audio={part2Audio} onAudioChange={setPart2Audio} hideImage={true} />
                                     )}
@@ -3435,7 +3579,7 @@
             const [authError, setAuthError] = useState('');
             const [authBusy, setAuthBusy] = useState(false);
 
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [authMode]);
 
             useEffect(() => {
                 const unsub = firebase.auth().onAuthStateChanged(async (u) => {
