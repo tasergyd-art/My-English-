@@ -1124,7 +1124,12 @@
 
             // Create Card
             const handleCreateCard = () => {
-                if (!frontText.trim() || !backText.trim() || !selectedDeck) return;
+                const hasFront = frontText.trim() || frontImage || frontAudio;
+                const hasBack = backText.trim() || backImage || backAudio;
+                if (!hasFront || !hasBack || !selectedDeck) {
+                    alert('أضف محتوى للوجه الأمامي والخلفي (نص أو صورة أو صوت) قبل الحفظ.');
+                    return;
+                }
 
                 const newCard = {
                     id: Date.now().toString(),
@@ -2043,7 +2048,7 @@
                     {status === 'error' && (
                         <p class="text-xs text-red-500 text-center py-6">تعذر عرض هذا الملف كصفحات، جرب "فتح في نافذة كاملة" أو "تنزيل الملف" بالأسفل.</p>
                     )}
-                    <div ref={containerRef} class="w-full max-h-[65vh] overflow-y-auto thin-scroll"></div>
+                    <div ref={containerRef} class="w-full"></div>
                 </div>
             );
         }
@@ -2357,18 +2362,15 @@
                                 <div class="space-y-2">
                                     {viewingFile.extractedText && (
                                         <div class="flex gap-2 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl w-fit mx-auto">
-                                            <button onClick={() => { setPdfViewMode('pages'); setIsEditingText(false); }} class={`px-4 py-1.5 rounded-lg text-xs font-bold ${pdfViewMode === 'pages' ? 'bg-white dark:bg-slate-700 shadow-sm text-primary-600' : 'text-slate-500'}`}>عرض الصفحات</button>
-                                            <button onClick={() => { setPdfViewMode('text'); setIsEditingText(false); }} class={`px-4 py-1.5 rounded-lg text-xs font-bold ${pdfViewMode === 'text' ? 'bg-white dark:bg-slate-700 shadow-sm text-primary-600' : 'text-slate-500'}`}>نص قابل للتعديل</button>
+                                            <button onClick={() => { setPdfViewMode('pages'); setIsEditingText(false); }} class={`px-4 py-1.5 rounded-lg text-xs font-bold ${pdfViewMode === 'pages' ? 'bg-white dark:bg-slate-700 shadow-sm text-primary-600' : 'text-slate-500'}`}>📄 عرض الملف</button>
+                                            <button onClick={() => { setPdfViewMode('text'); setIsEditingText(false); }} class={`px-4 py-1.5 rounded-lg text-xs font-bold ${pdfViewMode === 'text' ? 'bg-white dark:bg-slate-700 shadow-sm text-primary-600' : 'text-slate-500'}`}>✍️ الكتابة والحذف والترجمة</button>
                                         </div>
                                     )}
 
                                     {pdfViewMode === 'pages' && (
                                         <>
                                             <PdfPagesViewer dataUrl={viewingFile.content} />
-                                            <div class="flex gap-2">
-                                                <button onClick={() => { const w = window.open(); w.document.write(`<iframe src="${viewingFile.content}" style="border:0;width:100%;height:100vh;"></iframe>`); }} class="flex-1 bg-slate-100 text-slate-700 text-xs px-4 py-2 rounded-lg font-bold">فتح في نافذة كاملة</button>
-                                                <a href={viewingFile.content} download={viewingFile.name} class="flex-1 text-center bg-primary-500 text-white text-xs px-4 py-2 rounded-lg font-bold">تنزيل الملف</a>
-                                            </div>
+                                            <a href={viewingFile.content} download={viewingFile.name} class="block text-center bg-primary-500 text-white text-xs px-4 py-2 rounded-lg font-bold">تنزيل الملف</a>
                                         </>
                                     )}
 
@@ -2783,6 +2785,9 @@
                                         <span class="text-xs font-bold">الكتابة بلوحة المفاتيح</span>
                                     </button>
                                 </div>
+                                <button onClick={() => handleDeleteTopic(activeWriteTopic.id)} class="w-full flex items-center justify-center gap-1.5 text-red-500 text-xs font-bold py-2">
+                                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i> حذف هذا الموضوع
+                                </button>
                             </div>
                         </div>
                     )}
