@@ -72,6 +72,7 @@
     <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
 
     <!-- pdf.js لتوليد صورة مصغرة للصفحة الأولى من ملفات PDF -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -110,8 +111,33 @@
                 const dataToSend = pendingCloudData;
                 pendingCloudData = {};
                 firebase.firestore().collection('users').doc(cloudUid).set(dataToSend, { merge: true })
-                    .catch(err => console.error('تعذرت المزامنة السحابية (قد يكون حجم الملفات كبيراً جداً):', err));
+                    .then(() => { window.lastCloudSyncOk = true; })
+                    .catch(err => {
+                        console.error('تعذرت المزامنة السحابية:', err);
+                        window.lastCloudSyncOk = false;
+                        // تنبيه واضح للمستخدم بدل الفشل الصامت الذي كان يسبب فقدان بياناته على الأجهزة الأخرى
+                        if (window.notifyCloudSyncFailure) window.notifyCloudSyncFailure(key);
+                    });
             }, 1500);
+        }
+
+        // رفع أي محتوى Base64 (صورة/صوت/PDF) إلى Firebase Storage بدل تخزينه كنص ضخم داخل Firestore.
+        // هذا هو الإصلاح الجذري لمشكلة اختفاء البطاقات: مستندات Firestore محدودة بـ 1MB، وأي محتوى وسائط
+        // كان يتضخم بسرعة ويتجاوز هذا الحد فتفشل المزامنة بصمت، فتُستبدل بيانات الجهاز الآخر ببيانات قديمة ناقصة.
+        // بعد هذا التعديل: الوسائط تُرفع كملفات حقيقية في Storage (بلا حد 1MB)، وتُخزَّن روابطها الخفيفة فقط.
+        async function uploadDataUrlToStorage(dataUrl, folder) {
+            if (!cloudUid || !dataUrl || !dataUrl.startsWith('data:')) return dataUrl; // بدون حساب مسجل، أبقِ القيمة كما هي محلياً
+            try {
+                const storageRef = firebase.storage().ref();
+                const path = `users/${cloudUid}/${folder}/${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+                const fileRef = storageRef.child(path);
+                await fileRef.putString(dataUrl, 'data_url');
+                const url = await fileRef.getDownloadURL();
+                return url;
+            } catch (err) {
+                console.error('تعذر رفع الملف إلى Firebase Storage:', err);
+                return dataUrl; // فشل الرفع؟ نحتفظ بالنسخة المحلية بدل فقدانها
+            }
         }
 
         // ============ نظام الأصوات التفاعلية (بدون ملفات خارجية) ============
@@ -351,6 +377,14 @@
         function App({ onLogout, userEmail }) {
             const [currentTab, setCurrentTab] = useState('home');
             const [darkMode, setDarkMode] = useState(false);
+            const [syncWarning, setSyncWarning] = useState(null);
+
+            useEffect(() => {
+                window.notifyCloudSyncFailure = (key) => {
+                    setSyncWarning('تعذّرت مزامنة بعض بياناتك مع السحابة (يُحتمل بسبب حجم الملفات/الصور الكبير أو ضعف الاتصال). بياناتك محفوظة على هذا الجهاز، لكن قد لا تظهر على أجهزتك الأخرى حتى تُحل المشكلة.');
+                };
+                return () => { window.notifyCloudSyncFailure = null; };
+            }, []);
 
             // STATE FOR GLOBAL PROGRESS (STUDY CIRCLE)
             const [streaks, setStreaks] = useState(() => {
@@ -588,6 +622,18 @@
                         </div>
                     </header>
 
+                    {syncWarning && (
+                        <div class="bg-amber-50 dark:bg-amber-950/30 border-b border-amber-200 dark:border-amber-900 px-6 py-2.5 flex items-center justify-between gap-3">
+                            <div class="flex items-center gap-2 text-amber-700 dark:text-amber-400 text-xs font-bold">
+                                <i data-lucide="alert-triangle" class="w-4 h-4 shrink-0"></i>
+                                <span>{syncWarning}</span>
+                            </div>
+                            <button onClick={() => setSyncWarning(null)} class="text-amber-500 hover:text-amber-700 shrink-0">
+                                <i data-lucide="x" class="w-4 h-4"></i>
+                            </button>
+                        </div>
+                    )}
+
                     {/* Main Content Render */}
                     <main class="flex-1 max-w-5xl w-full mx-auto p-4 md:p-6">
                         {currentTab === 'home' && (
@@ -606,6 +652,8 @@
                                 decks={decks}
                                 setDecks={setDecks}
                                 onAddStats={makeStatAdder('vocabulary')}
+                                wordUnits={wordUnits}
+                                setWordUnits={setWordUnits}
                             />
                         )}
                         {currentTab === 'practice' && <PracticeHubScreen onNavigate={setCurrentTab} />}
@@ -911,19 +959,29 @@
         // ==========================================
         // مكوّن مساعد: إضافة صورة أو تسجيل صوتي من الملفات لأي حقل (وجه أمامي/خلفي...الخ)
         // ==========================================
-        function MediaAttachments({ image, onImageChange, audio, onAudioChange, hideImage = false }) {
+        function MediaAttachments({ image, onImageChange, audio, onAudioChange, hideImage = false, onUploadingChange }) {
             const fileInputRef = useRef(null);
             const audioInputRef = useRef(null);
             const mediaRecorderRef = useRef(null);
             const chunksRef = useRef([]);
             const [isRecording, setIsRecording] = useState(false);
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [image, audio, isRecording]);
+            const [uploadingImage, setUploadingImage] = useState(false);
+            const [uploadingAudio, setUploadingAudio] = useState(false);
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [image, audio, isRecording, uploadingImage, uploadingAudio]);
+            useEffect(() => { if (onUploadingChange) onUploadingChange(uploadingImage || uploadingAudio); }, [uploadingImage, uploadingAudio]);
 
             const handleImagePick = (e) => {
                 const file = e.target.files[0];
                 if (!file) return;
                 const reader = new FileReader();
-                reader.onload = () => onImageChange(reader.result);
+                reader.onload = async () => {
+                    const dataUrl = reader.result;
+                    onImageChange(dataUrl); // معاينة فورية محلياً
+                    setUploadingImage(true);
+                    const url = await uploadDataUrlToStorage(dataUrl, 'card-images');
+                    onImageChange(url); // نستبدلها برابط خفيف بعد الرفع لتفادي تضخم بيانات المزامنة
+                    setUploadingImage(false);
+                };
                 reader.readAsDataURL(file);
             };
 
@@ -931,7 +989,14 @@
                 const file = e.target.files[0];
                 if (!file) return;
                 const reader = new FileReader();
-                reader.onload = () => onAudioChange(reader.result);
+                reader.onload = async () => {
+                    const dataUrl = reader.result;
+                    onAudioChange(dataUrl);
+                    setUploadingAudio(true);
+                    const url = await uploadDataUrlToStorage(dataUrl, 'card-audio');
+                    onAudioChange(url);
+                    setUploadingAudio(false);
+                };
                 reader.readAsDataURL(file);
             };
 
@@ -944,7 +1009,14 @@
                     recorder.onstop = () => {
                         const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
                         const reader = new FileReader();
-                        reader.onload = () => onAudioChange(reader.result);
+                        reader.onload = async () => {
+                            const dataUrl = reader.result;
+                            onAudioChange(dataUrl);
+                            setUploadingAudio(true);
+                            const url = await uploadDataUrlToStorage(dataUrl, 'card-audio');
+                            onAudioChange(url);
+                            setUploadingAudio(false);
+                        };
                         reader.readAsDataURL(blob);
                         stream.getTracks().forEach(t => t.stop());
                     };
@@ -991,12 +1063,18 @@
                     {!hideImage && image && (
                         <div class="relative inline-block">
                             <img src={image} class="h-16 rounded-lg border border-slate-200" />
+                            {uploadingImage && (
+                                <div class="absolute inset-0 bg-slate-900/50 rounded-lg flex items-center justify-center">
+                                    <div class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                                </div>
+                            )}
                             <button type="button" onClick={() => onImageChange(null)} class="absolute -top-1.5 -left-1.5 bg-slate-800 text-white rounded-full w-4 h-4 flex items-center justify-center text-[9px]">×</button>
                         </div>
                     )}
                     {audio && (
                         <div class="flex items-center gap-2">
                             <audio controls src={audio} class="h-8 max-w-[220px]"></audio>
+                            {uploadingAudio && <span class="text-[10px] text-slate-400">جارٍ الرفع...</span>}
                             <button type="button" onClick={() => onAudioChange(null)} class="text-slate-300 hover:text-red-500"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
                         </div>
                     )}
@@ -1007,12 +1085,16 @@
         // ==========================================
         // 4. VOCABULARY SCREEN (SRS ENGINE DRIVEN)
         // ==========================================
-        function VocabularyScreen({ decks, setDecks, onAddStats }) {
+        function VocabularyScreen({ decks, setDecks, onAddStats, wordUnits, setWordUnits }) {
             const [selectedDeck, setSelectedDeck] = useState(null);
             const [isReviewing, setIsReviewing] = useState(false);
             const [isAddingCard, setIsAddingCard] = useState(false);
             const [isAddingDeck, setIsAddingDeck] = useState(false);
             const [managingDeck, setManagingDeck] = useState(null); // لعرض/حذف بطاقات رزمة معينة
+            const [copyingCard, setCopyingCard] = useState(null); // البطاقة المراد نسخها لقسم ممارسة المفردات
+            const [copyTargetUnitId, setCopyTargetUnitId] = useState(null);
+            const [copyClassification, setCopyClassification] = useState('Noun');
+            const [copyNewUnitName, setCopyNewUnitName] = useState('');
 
             // Inputs
             const [newDeckTitle, setNewDeckTitle] = useState('');
@@ -1022,6 +1104,8 @@
             const [frontAudio, setFrontAudio] = useState(null);
             const [backImage, setBackImage] = useState(null);
             const [backAudio, setBackAudio] = useState(null);
+            const [frontUploading, setFrontUploading] = useState(false);
+            const [backUploading, setBackUploading] = useState(false);
 
             // Search
             const [searchQuery, setSearchQuery] = useState('');
@@ -1031,7 +1115,7 @@
             const [currentCardIndex, setCurrentCardIndex] = useState(0);
             const [revealAnswer, setRevealAnswer] = useState(false);
 
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [isReviewing, managingDeck, isAddingCard, isAddingDeck, selectedDeck, decks.length]);
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [isReviewing, managingDeck, isAddingCard, isAddingDeck, selectedDeck, decks.length, copyingCard]);
 
             // Statistics computation
             const stats = useMemo(() => {
@@ -1114,6 +1198,37 @@
             // Delete Card
             const handleDeleteCard = (deckId, cardId) => {
                 setDecks(prev => prev.map(d => d.id === deckId ? { ...d, cards: d.cards.filter(c => c.id !== cardId) } : d));
+            };
+
+            // نسخ كلمة من بطاقة SRS إلى قسم "ممارسة المفردات" مع تحديد تصنيفها (اسم/فعل)
+            const handleConfirmCopyToPractice = () => {
+                if (!copyingCard) return;
+                const wordText = copyingCard.front.trim() || copyingCard.back.trim();
+                if (!wordText) { alert('لا يوجد نص بهذه البطاقة لنسخه.'); return; }
+
+                let targetUnitId = copyTargetUnitId;
+                let nextUnits = wordUnits;
+
+                // إنشاء رزمة جديدة إذا اختار المستخدم ذلك أو لا توجد رزم بعد
+                if (copyTargetUnitId === '__new__' || wordUnits.length === 0) {
+                    const name = copyNewUnitName.trim() || 'رزمة منسوخة من المفردات';
+                    const newUnit = { id: Date.now().toString(), name, words: [] };
+                    nextUnits = [...wordUnits, newUnit];
+                    targetUnitId = newUnit.id;
+                }
+
+                const newWord = {
+                    id: Date.now().toString() + '_c',
+                    text: wordText,
+                    classification: copyClassification,
+                    boxes: [false, false, false, false, false]
+                };
+
+                setWordUnits(nextUnits.map(u => u.id === targetUnitId ? { ...u, words: [...u.words, newWord] } : u));
+                playHardClick();
+                setCopyingCard(null);
+                setCopyNewUnitName('');
+                alert(`تم نسخ "${wordText}" إلى قسم ممارسة المفردات بنجاح.`);
             };
 
             const resetCardForm = () => {
@@ -1323,14 +1438,55 @@
                                                 <p class="font-bold">{card.front}</p>
                                                 <p class="text-slate-400">{card.back}</p>
                                             </div>
-                                            <button onClick={() => handleDeleteCard(managingDeck.id, card.id)} class="text-slate-300 hover:text-red-500 shrink-0">
-                                                <i data-lucide="trash-2" class="w-4 h-4"></i>
-                                            </button>
+                                            <div class="flex items-center gap-2 shrink-0">
+                                                <button onClick={() => { setCopyingCard(card); setCopyTargetUnitId(wordUnits[0]?.id || null); setCopyClassification('Noun'); }} title="نسخ إلى ممارسة المفردات" class="text-slate-400 hover:text-primary-500">
+                                                    <i data-lucide="copy" class="w-4 h-4"></i>
+                                                </button>
+                                                <button onClick={() => handleDeleteCard(managingDeck.id, card.id)} class="text-slate-300 hover:text-red-500">
+                                                    <i data-lucide="trash-2" class="w-4 h-4"></i>
+                                                </button>
+                                            </div>
                                         </div>
                                     ))}
                                     {decks.find(d => d.id === managingDeck.id)?.cards.length === 0 && (
                                         <p class="text-xs text-slate-400 text-center py-6">لا توجد بطاقات في هذه الرزمة بعد.</p>
                                     )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Copy word to Word Practice section popup */}
+                    {copyingCard && (
+                        <div class="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
+                            <div class="bg-white dark:bg-slate-800 w-full max-w-sm rounded-3xl p-6 space-y-4">
+                                <div class="flex justify-between items-center">
+                                    <h3 class="text-lg font-bold">نسخ "{copyingCard.front || copyingCard.back}" إلى ممارسة المفردات</h3>
+                                    <BackButton onClick={() => setCopyingCard(null)} label="إغلاق" />
+                                </div>
+
+                                <div class="space-y-2">
+                                    <label class="text-[11px] font-bold text-slate-500">الرزمة الوجهة:</label>
+                                    <select value={copyTargetUnitId || ''} onChange={(e) => setCopyTargetUnitId(e.target.value)} class="w-full border p-3 rounded-xl text-sm">
+                                        {wordUnits.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+                                        <option value="__new__">+ إنشاء رزمة جديدة</option>
+                                    </select>
+                                    {(copyTargetUnitId === '__new__' || wordUnits.length === 0) && (
+                                        <input type="text" placeholder="اسم الرزمة الجديدة..." value={copyNewUnitName} onChange={(e) => setCopyNewUnitName(e.target.value)} class="w-full border p-3 rounded-xl text-sm" />
+                                    )}
+                                </div>
+
+                                <div class="space-y-2">
+                                    <label class="text-[11px] font-bold text-slate-500">تصنيف الكلمة:</label>
+                                    <div class="flex gap-2">
+                                        <button onClick={() => setCopyClassification('Noun')} class={`flex-1 py-2 rounded-lg text-xs font-bold ${copyClassification === 'Noun' ? 'bg-primary-500 text-white' : 'bg-slate-100 text-slate-600'}`}>اسم (Noun)</button>
+                                        <button onClick={() => setCopyClassification('Verb')} class={`flex-1 py-2 rounded-lg text-xs font-bold ${copyClassification === 'Verb' ? 'bg-primary-500 text-white' : 'bg-slate-100 text-slate-600'}`}>فعل (Verb)</button>
+                                    </div>
+                                </div>
+
+                                <div class="flex justify-end gap-2">
+                                    <button onClick={() => setCopyingCard(null)} class="px-4 py-2 text-slate-500">إلغاء</button>
+                                    <button onClick={handleConfirmCopyToPractice} class="bg-primary-500 text-white px-5 py-2 rounded-xl font-bold">نسخ</button>
                                 </div>
                             </div>
                         </div>
@@ -1354,7 +1510,7 @@
                                         onChange={(e) => setFrontText(e.target.value)}
                                         class="w-full border border-slate-200 dark:border-slate-700 p-3 rounded-xl text-sm"
                                     />
-                                    <MediaAttachments image={frontImage} onImageChange={setFrontImage} audio={frontAudio} onAudioChange={setFrontAudio} />
+                                    <MediaAttachments image={frontImage} onImageChange={setFrontImage} audio={frontAudio} onAudioChange={setFrontAudio} onUploadingChange={setFrontUploading} />
                                 </div>
 
                                 <div class="space-y-2 p-3 bg-slate-50 dark:bg-slate-900 rounded-xl">
@@ -1366,12 +1522,14 @@
                                         onChange={(e) => setBackText(e.target.value)}
                                         class="w-full border border-slate-200 dark:border-slate-700 p-3 rounded-xl text-sm"
                                     />
-                                    <MediaAttachments image={backImage} onImageChange={setBackImage} audio={backAudio} onAudioChange={setBackAudio} />
+                                    <MediaAttachments image={backImage} onImageChange={setBackImage} audio={backAudio} onAudioChange={setBackAudio} onUploadingChange={setBackUploading} />
                                 </div>
 
                                 <div class="flex justify-end gap-2">
                                     <button onClick={() => setIsAddingCard(false)} class="px-4 py-2 text-slate-500">إلغاء</button>
-                                    <button onClick={handleCreateCard} class="bg-primary-500 text-white px-5 py-2 rounded-xl">حفظ البطاقة</button>
+                                    <button onClick={handleCreateCard} disabled={frontUploading || backUploading} class={`px-5 py-2 rounded-xl text-white ${frontUploading || backUploading ? 'bg-slate-300 cursor-not-allowed' : 'bg-primary-500'}`}>
+                                        {frontUploading || backUploading ? 'جارٍ رفع الوسائط...' : 'حفظ البطاقة'}
+                                    </button>
                                 </div>
                             </div>
                         </div>
@@ -2170,7 +2328,12 @@
                     reader.onload = () => { setPickedFile({ kind: 'text', content: reader.result, mime }); setFilePickStatus('ready'); };
                     reader.readAsText(file);
                 } else if (isImage) {
-                    reader.onload = () => { setPickedFile({ kind: 'image', content: reader.result, mime }); setFilePickStatus('ready'); };
+                    reader.onload = async () => {
+                        const dataUrl = reader.result;
+                        const url = await uploadDataUrlToStorage(dataUrl, 'reading-files');
+                        setPickedFile({ kind: 'image', content: url, mime });
+                        setFilePickStatus('ready');
+                    };
                     reader.readAsDataURL(file);
                 } else if (isPdf) {
                     reader.onload = async () => {
@@ -2218,7 +2381,7 @@
 
             // حفظ التعديل على محتوى النص نفسه (كتابة/حذف داخل الملف) - يدعم ملفات النص وملفات PDF (كنص مستخرج)
             const handleSaveTextEdit = () => {
-                const field = viewingFile.kind === 'pdf' ? 'extractedText' : 'content';
+                const field = viewingFile.kind === 'text' ? 'content' : 'extractedText';
                 setUnits(prev => prev.map(u => {
                     if (u.id !== selectedUnit.id) return u;
                     return { ...u, files: u.files.map(f => f.id === viewingFile.id ? { ...f, [field]: editDraft } : f) };
@@ -2356,16 +2519,42 @@
                                 />
                             )}
                             {viewingFile.kind === 'image' && (
-                                <img src={viewingFile.content} class="w-full rounded-xl border" />
+                                <div class="space-y-2">
+                                    <div class="flex gap-2 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl w-fit mx-auto">
+                                        <button onClick={() => { setPdfViewMode('pages'); setIsEditingText(false); }} class={`px-4 py-1.5 rounded-lg text-xs font-bold ${pdfViewMode === 'pages' ? 'bg-white dark:bg-slate-700 shadow-sm text-primary-600' : 'text-slate-500'}`}>🖼️ عرض الصورة</button>
+                                        <button onClick={() => { setPdfViewMode('text'); setIsEditingText(false); }} class={`px-4 py-1.5 rounded-lg text-xs font-bold ${pdfViewMode === 'text' ? 'bg-white dark:bg-slate-700 shadow-sm text-primary-600' : 'text-slate-500'}`}>✍️ الكتابة والحذف والترجمة</button>
+                                    </div>
+
+                                    {pdfViewMode === 'pages' && (
+                                        <img src={viewingFile.content} class="w-full rounded-xl border" />
+                                    )}
+
+                                    {pdfViewMode === 'text' && !isEditingText && (
+                                        viewingFile.extractedText && viewingFile.extractedText.trim() ? (
+                                            <p class="text-base leading-relaxed text-slate-700 dark:text-slate-200 select-text notebook-paper p-4 rounded-xl whitespace-pre-wrap">{viewingFile.extractedText}</p>
+                                        ) : (
+                                            <div class="text-center p-6 notebook-paper rounded-xl space-y-2">
+                                                <p class="text-xs text-slate-500">لا يوجد نص مكتوب لهذه الصورة بعد.</p>
+                                                <p class="text-xs text-slate-500">اضغط "تعديل النص" أدناه لكتابة أو نسخ النص الظاهر بالصورة يدوياً، وسيُحفظ ويصبح قابلاً للترجمة.</p>
+                                            </div>
+                                        )
+                                    )}
+                                    {pdfViewMode === 'text' && isEditingText && (
+                                        <textarea
+                                            value={editDraft}
+                                            onChange={(e) => setEditDraft(e.target.value)}
+                                            placeholder="اكتب أو الصق النص الموجود بالصورة هنا يدوياً..."
+                                            class="w-full h-64 text-base leading-relaxed text-slate-700 notebook-paper p-4 rounded-xl border border-primary-300 focus:outline-none focus:ring-2 focus:ring-primary-400"
+                                        />
+                                    )}
+                                </div>
                             )}
                             {viewingFile.kind === 'pdf' && (
                                 <div class="space-y-2">
-                                    {viewingFile.extractedText && (
-                                        <div class="flex gap-2 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl w-fit mx-auto">
-                                            <button onClick={() => { setPdfViewMode('pages'); setIsEditingText(false); }} class={`px-4 py-1.5 rounded-lg text-xs font-bold ${pdfViewMode === 'pages' ? 'bg-white dark:bg-slate-700 shadow-sm text-primary-600' : 'text-slate-500'}`}>📄 عرض الملف</button>
-                                            <button onClick={() => { setPdfViewMode('text'); setIsEditingText(false); }} class={`px-4 py-1.5 rounded-lg text-xs font-bold ${pdfViewMode === 'text' ? 'bg-white dark:bg-slate-700 shadow-sm text-primary-600' : 'text-slate-500'}`}>✍️ الكتابة والحذف والترجمة</button>
-                                        </div>
-                                    )}
+                                    <div class="flex gap-2 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl w-fit mx-auto">
+                                        <button onClick={() => { setPdfViewMode('pages'); setIsEditingText(false); }} class={`px-4 py-1.5 rounded-lg text-xs font-bold ${pdfViewMode === 'pages' ? 'bg-white dark:bg-slate-700 shadow-sm text-primary-600' : 'text-slate-500'}`}>📄 عرض الملف</button>
+                                        <button onClick={() => { setPdfViewMode('text'); setIsEditingText(false); }} class={`px-4 py-1.5 rounded-lg text-xs font-bold ${pdfViewMode === 'text' ? 'bg-white dark:bg-slate-700 shadow-sm text-primary-600' : 'text-slate-500'}`}>✍️ الكتابة والحذف والترجمة</button>
+                                    </div>
 
                                     {pdfViewMode === 'pages' && (
                                         <>
@@ -2375,12 +2564,20 @@
                                     )}
 
                                     {pdfViewMode === 'text' && !isEditingText && (
-                                        <p class="text-base leading-relaxed text-slate-700 dark:text-slate-200 select-text notebook-paper p-4 rounded-xl whitespace-pre-wrap">{viewingFile.extractedText}</p>
+                                        viewingFile.extractedText && viewingFile.extractedText.trim() ? (
+                                            <p class="text-base leading-relaxed text-slate-700 dark:text-slate-200 select-text notebook-paper p-4 rounded-xl whitespace-pre-wrap">{viewingFile.extractedText}</p>
+                                        ) : (
+                                            <div class="text-center p-6 notebook-paper rounded-xl space-y-2">
+                                                <p class="text-xs text-slate-500">هذا الملف على الأغلب صور ممسوحة ضوئياً بدون نص قابل للاستخراج تلقائياً.</p>
+                                                <p class="text-xs text-slate-500">اضغط "تعديل النص" أدناه لكتابة أو نسخ النص يدوياً، وسيُحفظ ويصبح قابلاً للترجمة مستقبلاً.</p>
+                                            </div>
+                                        )
                                     )}
                                     {pdfViewMode === 'text' && isEditingText && (
                                         <textarea
                                             value={editDraft}
                                             onChange={(e) => setEditDraft(e.target.value)}
+                                            placeholder="اكتب أو الصق نص هذا الملف هنا يدوياً..."
                                             class="w-full h-64 text-base leading-relaxed text-slate-700 notebook-paper p-4 rounded-xl border border-primary-300 focus:outline-none focus:ring-2 focus:ring-primary-400"
                                         />
                                     )}
@@ -2393,14 +2590,14 @@
                                 </div>
                             )}
 
-                            {(viewingFile.kind === 'text' || (viewingFile.kind === 'pdf' && pdfViewMode === 'text')) && (
+                            {(viewingFile.kind === 'text' || ((viewingFile.kind === 'pdf' || viewingFile.kind === 'image') && pdfViewMode === 'text')) && (
                                 <div class="flex flex-wrap gap-2">
                                     {!isEditingText && (
                                         <>
                                             <button onClick={handleTranslateSelection} class="flex items-center gap-1.5 bg-blue-50 text-blue-600 px-4 py-2 rounded-xl text-xs font-bold">
                                                 <i data-lucide="languages" class="w-4 h-4"></i> ترجمة الجزء المحدد
                                             </button>
-                                            <button onClick={() => { setEditDraft(viewingFile.kind === 'pdf' ? viewingFile.extractedText : viewingFile.content); setIsEditingText(true); }} class="flex items-center gap-1.5 bg-slate-100 text-slate-700 px-4 py-2 rounded-xl text-xs font-bold">
+                                            <button onClick={() => { setEditDraft(viewingFile.kind === 'text' ? viewingFile.content : (viewingFile.extractedText || '')); setIsEditingText(true); }} class="flex items-center gap-1.5 bg-slate-100 text-slate-700 px-4 py-2 rounded-xl text-xs font-bold">
                                                 <i data-lucide="pencil" class="w-4 h-4"></i> تعديل النص (كتابة/حذف)
                                             </button>
                                         </>
