@@ -72,6 +72,14 @@
     <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+
+    <!-- pdf.js لتوليد صورة مصغرة للصفحة الأولى من ملفات PDF -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>
+        if (window['pdfjsLib']) {
+            window['pdfjsLib'].GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        }
+    </script>
     <script>
         const firebaseConfig = {
             apiKey: "AIzaSyCVaJ-CYcULY-mIQ43hA8jyll41pocj-Sc",
@@ -104,6 +112,71 @@
                 firebase.firestore().collection('users').doc(cloudUid).set(dataToSend, { merge: true })
                     .catch(err => console.error('تعذرت المزامنة السحابية (قد يكون حجم الملفات كبيراً جداً):', err));
             }, 1500);
+        }
+
+        // ============ نظام الأصوات التفاعلية (بدون ملفات خارجية) ============
+        let audioCtx = null;
+        function getAudioCtx() {
+            if (!audioCtx) {
+                try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return null; }
+            }
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            return audioCtx;
+        }
+        function playTone(freq, duration, startTime, volume, type = 'sine') {
+            const ctx = getAudioCtx();
+            if (!ctx) return;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = type;
+            osc.frequency.value = freq;
+            gain.gain.setValueAtTime(0, ctx.currentTime + startTime);
+            gain.gain.linearRampToValueAtTime(volume, ctx.currentTime + startTime + 0.01);
+            gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + startTime + duration);
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start(ctx.currentTime + startTime);
+            osc.stop(ctx.currentTime + startTime + duration + 0.02);
+        }
+        // نقرة ناعمة وخفيفة (Soft) - للأزرار العادية والتنقل
+        function playSoftClick() { playTone(720, 0.05, 0, 0.06, 'sine'); }
+        // نقرة أقوى قليلاً (Hard) - للإجراءات المهمة (حذف، حفظ)
+        function playHardClick() { playTone(320, 0.09, 0, 0.10, 'square'); }
+        // صوت إجابة صحيحة - نغمة صاعدة مبهجة
+        function playCorrectSound() {
+            playTone(523.25, 0.12, 0, 0.11, 'sine');
+            playTone(659.25, 0.15, 0.09, 0.11, 'sine');
+            playTone(783.99, 0.2, 0.18, 0.1, 'sine');
+        }
+        // صوت إجابة خاطئة - نغمة هابطة قصيرة
+        function playWrongSound() {
+            playTone(300, 0.14, 0, 0.08, 'sawtooth');
+            playTone(220, 0.18, 0.1, 0.08, 'sawtooth');
+        }
+        // صوت إنجاز/إكمال مهمة - نغمة احتفالية قصيرة
+        function playCompleteSound() {
+            playTone(523.25, 0.1, 0, 0.1, 'triangle');
+            playTone(659.25, 0.1, 0.08, 0.1, 'triangle');
+            playTone(783.99, 0.1, 0.16, 0.1, 'triangle');
+            playTone(1046.5, 0.22, 0.24, 0.12, 'triangle');
+        }
+
+        // توليد صورة مصغرة لأول صفحة من ملف PDF (لعرضها ببطاقة المستند)
+        async function generatePdfThumbnail(dataUrl) {
+            try {
+                if (!window['pdfjsLib']) return null;
+                const pdf = await window['pdfjsLib'].getDocument(dataUrl).promise;
+                const page = await pdf.getPage(1);
+                const viewport = page.getViewport({ scale: 0.5 });
+                const canvas = document.createElement('canvas');
+                canvas.width = viewport.width;
+                canvas.height = viewport.height;
+                await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+                return canvas.toDataURL('image/jpeg', 0.7);
+            } catch (err) {
+                console.error('تعذر توليد صورة مصغرة لملف PDF:', err);
+                return null;
+            }
         }
 
         function translateAuthError(err) {
@@ -610,7 +683,7 @@
         function NavigationButton({ active, icon, label, onClick }) {
             useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, []);
             return (
-                <button onClick={onClick} class={`flex flex-col items-center gap-1 px-3 py-1 rounded-xl transition-all duration-200 ${active ? 'text-primary-500 scale-110' : 'text-slate-400 dark:text-slate-500 hover:text-slate-600'}`}>
+                <button onClick={() => { playSoftClick(); onClick(); }} class={`flex flex-col items-center gap-1 px-3 py-1 rounded-xl transition-all duration-200 ${active ? 'text-primary-500 scale-110' : 'text-slate-400 dark:text-slate-500 hover:text-slate-600'}`}>
                     <i data-lucide={icon} class="w-5 h-5"></i>
                     <span class="text-[10px] font-semibold">{label}</span>
                 </button>
@@ -977,6 +1050,7 @@
 
             // Handle user choice rating on a card
             const handleRateCard = (grade) => {
+                if (grade === 1) { playWrongSound(); } else { playCorrectSound(); }
                 const currentCard = reviewCards[currentCardIndex];
                 const updatedStats = SRSScheduler.calculate(currentCard, grade);
 
@@ -1790,9 +1864,11 @@
         // ==========================================
         // مكوّن لوحة رسم/تعليق (بالقلم أو الإصبع) فوق الملف المعروض، مع إمكانية المسح والحفظ
         // ==========================================
-        function AnnotationCanvas({ initialData, onSave, height = 320 }) {
+        function AnnotationCanvas({ initialData, onSave, height = 900 }) {
             const canvasRef = useRef(null);
+            const wrapperRef = useRef(null);
             const drawingRef = useRef(false);
+            const lastTouchYRef = useRef(null);
             const [mode, setMode] = useState('pen'); // pen | eraser
             useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [mode]);
 
@@ -1814,6 +1890,11 @@
             };
 
             const startDraw = (e) => {
+                if (e.touches && e.touches.length > 1) {
+                    drawingRef.current = false;
+                    lastTouchYRef.current = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                    return; // إصبعين = تمرير، مو رسم
+                }
                 e.preventDefault();
                 drawingRef.current = true;
                 const ctx = canvasRef.current.getContext('2d');
@@ -1823,6 +1904,15 @@
             };
 
             const draw = (e) => {
+                if (e.touches && e.touches.length > 1) {
+                    drawingRef.current = false;
+                    const currentY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                    if (lastTouchYRef.current !== null && wrapperRef.current) {
+                        wrapperRef.current.scrollTop -= (currentY - lastTouchYRef.current);
+                    }
+                    lastTouchYRef.current = currentY;
+                    return;
+                }
                 if (!drawingRef.current) return;
                 e.preventDefault();
                 const ctx = canvasRef.current.getContext('2d');
@@ -1835,15 +1925,17 @@
                 ctx.stroke();
             };
 
-            const endDraw = () => { drawingRef.current = false; };
+            const endDraw = () => { drawingRef.current = false; lastTouchYRef.current = null; };
 
             const clearCanvas = () => {
+                playHardClick();
                 const canvas = canvasRef.current;
                 const ctx = canvas.getContext('2d');
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
             };
 
             const handleSave = () => {
+                playHardClick();
                 onSave(canvasRef.current.toDataURL('image/png'));
             };
 
@@ -1863,14 +1955,17 @@
                             <i data-lucide="save" class="w-3.5 h-3.5"></i> حفظ التعديلات
                         </button>
                     </div>
-                    <canvas
-                        ref={canvasRef}
-                        width={600}
-                        height={height}
-                        class="draw-canvas w-full bg-white border border-slate-200 rounded-xl"
-                        onMouseDown={startDraw} onMouseMove={draw} onMouseUp={endDraw} onMouseLeave={endDraw}
-                        onTouchStart={startDraw} onTouchMove={draw} onTouchEnd={endDraw}
-                    ></canvas>
+                    <div ref={wrapperRef} class="notebook-paper w-full rounded-xl border border-slate-200 overflow-y-auto thin-scroll" style="max-height: 420px;">
+                        <canvas
+                            ref={canvasRef}
+                            width={600}
+                            height={height}
+                            class="draw-canvas w-full block bg-transparent"
+                            onMouseDown={startDraw} onMouseMove={draw} onMouseUp={endDraw} onMouseLeave={endDraw}
+                            onTouchStart={startDraw} onTouchMove={draw} onTouchEnd={endDraw}
+                        ></canvas>
+                    </div>
+                    <p class="text-[10px] text-slate-400 text-center">مرّر للأسفل داخل الورقة للحصول على مساحة كتابة أكبر</p>
                 </div>
             );
         }
@@ -1890,6 +1985,14 @@
                         {file.kind === 'image' ? (
                             <div class="h-28 w-full bg-slate-100 dark:bg-slate-700 overflow-hidden">
                                 <img src={file.content} class="w-full h-full object-cover" />
+                            </div>
+                        ) : file.kind === 'pdf' && file.thumbnail ? (
+                            <div class="h-28 w-full bg-slate-100 dark:bg-slate-700 overflow-hidden flex items-start justify-center">
+                                <img src={file.thumbnail} class="w-full h-full object-cover object-top" />
+                            </div>
+                        ) : file.kind === 'text' ? (
+                            <div class="h-28 w-full p-3 bg-blue-50/50 dark:bg-slate-700/40 overflow-hidden">
+                                <p class="text-[10px] leading-relaxed text-slate-500 dark:text-slate-300 line-clamp-5 whitespace-pre-wrap">{file.content}</p>
                             </div>
                         ) : (
                             <div class={`h-28 w-full flex items-center justify-center ${kindMeta.color} dark:bg-slate-700/40`}>
@@ -1986,7 +2089,12 @@
                     reader.onload = () => { setPickedFile({ kind: 'image', content: reader.result, mime }); setFilePickStatus('ready'); };
                     reader.readAsDataURL(file);
                 } else if (isPdf) {
-                    reader.onload = () => { setPickedFile({ kind: 'pdf', content: reader.result, mime }); setFilePickStatus('ready'); };
+                    reader.onload = async () => {
+                        const dataUrl = reader.result;
+                        const thumb = await generatePdfThumbnail(dataUrl);
+                        setPickedFile({ kind: 'pdf', content: dataUrl, mime, thumbnail: thumb });
+                        setFilePickStatus('ready');
+                    };
                     reader.readAsDataURL(file);
                 } else {
                     // نوع آخر (Word، إلخ): نحفظه كملف قابل للتنزيل مع تنبيه أنه لا يمكن معاينته مباشرة
@@ -2004,8 +2112,8 @@
                 if (fileMode === 'type' && !fileTextContent.trim()) return;
 
                 const newFile = fileMode === 'upload'
-                    ? { id: Date.now().toString(), name: fileName, kind: pickedFile.kind, content: pickedFile.content, annotation: null }
-                    : { id: Date.now().toString(), name: fileName, kind: 'text', content: fileTextContent, annotation: null };
+                    ? { id: Date.now().toString(), name: fileName, kind: pickedFile.kind, content: pickedFile.content, thumbnail: pickedFile.thumbnail || null, annotation: null }
+                    : { id: Date.now().toString(), name: fileName, kind: 'text', content: fileTextContent, thumbnail: null, annotation: null };
 
                 setUnits(prev => prev.map(u => u.id === selectedUnit.id ? { ...u, files: [...u.files, newFile] } : u));
 
@@ -2032,18 +2140,21 @@
             };
 
             const handleFinishReading = (unitId, fileId, fileNameVal) => {
+                playCompleteSound();
                 onAddStats(15); // إضافة 15 دقيقة قراءة تلقائياً
                 alert(`أحسنت! تم تسجيل إكمال قراءة الملف "${fileNameVal}".`);
             };
 
             const handleDeleteUnit = (unitId) => {
                 if (!confirm('حذف هذه الوحدة وجميع ملفاتها؟')) return;
+                playHardClick();
                 setUnits(units.filter(u => u.id !== unitId));
                 if (selectedUnitId === unitId) setSelectedUnitId(null);
             };
 
             const handleDeleteFile = (unitId, fileId) => {
                 if (!confirm('هل تريد حذف هذا الملف؟')) return;
+                playHardClick();
                 setUnits(prev => prev.map(u => u.id === unitId ? { ...u, files: u.files.filter(f => f.id !== fileId) } : u));
                 setViewingFileId(null);
                 setIsEditingText(false);
@@ -2159,7 +2270,14 @@
                                 <img src={viewingFile.content} class="w-full rounded-xl border" />
                             )}
                             {viewingFile.kind === 'pdf' && (
-                                <embed src={viewingFile.content} type="application/pdf" class="w-full h-[65vh] rounded-xl border" />
+                                <div class="space-y-2">
+                                    <iframe src={viewingFile.content} class="w-full h-[65vh] rounded-xl border bg-slate-50"></iframe>
+                                    <div class="flex gap-2">
+                                        <button onClick={() => { const w = window.open(); w.document.write(`<iframe src="${viewingFile.content}" style="border:0;width:100%;height:100vh;"></iframe>`); }} class="flex-1 bg-slate-100 text-slate-700 text-xs px-4 py-2 rounded-lg font-bold">فتح في نافذة كاملة</button>
+                                        <a href={viewingFile.content} download={viewingFile.name} class="flex-1 text-center bg-primary-500 text-white text-xs px-4 py-2 rounded-lg font-bold">تنزيل الملف</a>
+                                    </div>
+                                    <p class="text-[10px] text-slate-400 text-center">لو ما ظهر الملف بالمعاينة أعلاه (يحصل أحياناً بمتصفح الجوال)، استخدم "فتح في نافذة كاملة" أو "تنزيل الملف".</p>
+                                </div>
                             )}
                             {viewingFile.kind === 'other' && (
                                 <div class="text-center p-6 bg-slate-50 rounded-xl space-y-3">
@@ -2399,7 +2517,16 @@
 
             const handleAcceptSuggestion = () => {
                 if (suggestions.length === 0) return;
-                handleCreateTopic(suggestions[suggestionIndex].text);
+                playHardClick();
+                const chosenText = suggestions[suggestionIndex].text;
+                const newTopic = { id: Date.now().toString(), title: chosenText, duration: 10, completed: false, text: '' };
+                setWritingTopics(prev => [...prev, newTopic]);
+                setIsAddingTopic(false);
+                // فتح الموضوع الجديد فوراً حتى يرى المستخدم إضافته مباشرة
+                setActiveWriteTopic(newTopic);
+                setWriteMode(null);
+                setEssayText('');
+                setAnalysisResult(null);
             };
 
             const handleAnalyzeText = () => {
@@ -2482,18 +2609,20 @@
                                     </div>
 
                                     {suggestions.length > 0 ? (
-                                        <div class="flex items-center gap-2 pt-2">
-                                            <button onClick={() => setSuggestionIndex(i => (i - 1 + suggestions.length) % suggestions.length)} class="p-2 bg-white border rounded-full">
-                                                <i data-lucide="chevron-right" class="w-4 h-4"></i>
-                                            </button>
-                                            <div class="flex-1 text-center bg-white border rounded-xl py-3 px-2 font-bold text-sm">
-                                                {suggestions[suggestionIndex]?.text}
+                                        <div class="space-y-2 pt-2">
+                                            <div class="flex items-center gap-2">
+                                                <button onClick={() => { playSoftClick(); setSuggestionIndex(i => (i - 1 + suggestions.length) % suggestions.length); }} class="p-2 bg-white border rounded-full">
+                                                    <i data-lucide="chevron-right" class="w-4 h-4"></i>
+                                                </button>
+                                                <div class="flex-1 text-center bg-white border rounded-xl py-3 px-2 font-bold text-sm">
+                                                    {suggestions[suggestionIndex]?.text}
+                                                </div>
+                                                <button onClick={() => { playSoftClick(); setSuggestionIndex(i => (i + 1) % suggestions.length); }} class="p-2 bg-white border rounded-full">
+                                                    <i data-lucide="chevron-left" class="w-4 h-4"></i>
+                                                </button>
                                             </div>
-                                            <button onClick={() => setSuggestionIndex(i => (i + 1) % suggestions.length)} class="p-2 bg-white border rounded-full">
-                                                <i data-lucide="chevron-left" class="w-4 h-4"></i>
-                                            </button>
-                                            <button onClick={handleAcceptSuggestion} title="إضافة هذا الاقتراح كموضوع" class="p-2 bg-emerald-500 text-white rounded-full">
-                                                <i data-lucide="check" class="w-4 h-4"></i>
+                                            <button onClick={handleAcceptSuggestion} class="w-full flex items-center justify-center gap-2 bg-emerald-500 text-white py-2.5 rounded-xl font-bold text-xs">
+                                                <i data-lucide="check-circle" class="w-4 h-4"></i> استخدم هذا كموضوع كتابتي الآن
                                             </button>
                                         </div>
                                     ) : (
@@ -2545,7 +2674,7 @@
                                         ))}
                                     </div>
                                 </div>
-                                <AnnotationCanvas key={activeWriteTopic.id} height={420} onSave={() => { onAddStats(essayDuration); alert('تم حفظ ما كتبته بخط يدك، وأُضيفت دقائق الجلسة إلى إحصائياتك.'); }} />
+                                <AnnotationCanvas key={activeWriteTopic.id} height={900} onSave={() => { onAddStats(essayDuration); alert('تم حفظ ما كتبته بخط يدك، وأُضيفت دقائق الجلسة إلى إحصائياتك.'); }} />
                             </div>
                         </div>
                     )}
@@ -2681,7 +2810,7 @@
                         })
                     };
                 }));
-                if (justCompleted) onAddStats(10); // إضافة 10 دقائق استماع عند التأكيد اليدوي فقط
+                if (justCompleted) { playCompleteSound(); onAddStats(10); } // إضافة 10 دقائق استماع عند التأكيد اليدوي فقط
             };
 
             return (
@@ -3038,7 +3167,7 @@
                     if (u.id !== unitId) return u;
                     return { ...u, lessons: u.lessons.map(l => { if (l.id !== lessonId) return l; justCompleted = !l.completed; return { ...l, completed: !l.completed }; }) };
                 }));
-                if (justCompleted) onAddStats(10);
+                if (justCompleted) { playCompleteSound(); onAddStats(10); }
             };
 
             return (
