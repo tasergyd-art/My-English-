@@ -72,7 +72,6 @@
     <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-storage-compat.js"></script>
 
     <!-- pdf.js لتوليد صورة مصغرة للصفحة الأولى من ملفات PDF -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -100,44 +99,57 @@
         // ============ مزامنة سحابية مع Firestore ============
         // uid المستخدم الحالي (يُحدَّث من AuthGate عند تسجيل الدخول/الخروج)
         let cloudUid = null;
-        let pendingCloudData = {};
-        let cloudSyncTimer = null;
+        let cloudSyncTimers = {};
 
+        // كل مفتاح بيانات (srs_decks، reading_units_new...) يُزامن كمستند Firestore مستقل تحت
+        // users/{uid}/data/{key} بدل مستند واحد ضخم لكل البيانات. هذا يمنع مشكلة "اختفاء البطاقات":
+        // سابقاً، تجاوز أي مفتاح واحد لحد 1MB كان يُفشل مزامنة كل البيانات دفعة واحدة بصمت،
+        // وأي جهاز آخر يفتح الحساب كان "يبلع" نسخة سحابية قديمة ناقصة فتختفي البطاقات الجديدة.
+        // الآن: فشل مزامنة مفتاح واحد لا يؤثر على بقية المفاتيح، ويظهر تنبيه صريح يسمي المفتاح المتعطل.
         function scheduleCloudSync(key, value) {
             if (!cloudUid) return; // لا يوجد مستخدم مسجل دخول بعد
-            pendingCloudData[key] = value;
-            if (cloudSyncTimer) clearTimeout(cloudSyncTimer);
-            cloudSyncTimer = setTimeout(() => {
-                const dataToSend = pendingCloudData;
-                pendingCloudData = {};
-                firebase.firestore().collection('users').doc(cloudUid).set(dataToSend, { merge: true })
+            if (cloudSyncTimers[key]) clearTimeout(cloudSyncTimers[key]);
+            cloudSyncTimers[key] = setTimeout(() => {
+                delete cloudSyncTimers[key];
+                firebase.firestore().collection('users').doc(cloudUid).collection('data').doc(key)
+                    .set({ value: value, updatedAt: Date.now() })
                     .then(() => { window.lastCloudSyncOk = true; })
                     .catch(err => {
-                        console.error('تعذرت المزامنة السحابية:', err);
+                        console.error(`تعذرت مزامنة "${key}":`, err);
                         window.lastCloudSyncOk = false;
-                        // تنبيه واضح للمستخدم بدل الفشل الصامت الذي كان يسبب فقدان بياناته على الأجهزة الأخرى
                         if (window.notifyCloudSyncFailure) window.notifyCloudSyncFailure(key);
                     });
             }, 1500);
         }
 
-        // رفع أي محتوى Base64 (صورة/صوت/PDF) إلى Firebase Storage بدل تخزينه كنص ضخم داخل Firestore.
-        // هذا هو الإصلاح الجذري لمشكلة اختفاء البطاقات: مستندات Firestore محدودة بـ 1MB، وأي محتوى وسائط
-        // كان يتضخم بسرعة ويتجاوز هذا الحد فتفشل المزامنة بصمت، فتُستبدل بيانات الجهاز الآخر ببيانات قديمة ناقصة.
-        // بعد هذا التعديل: الوسائط تُرفع كملفات حقيقية في Storage (بلا حد 1MB)، وتُخزَّن روابطها الخفيفة فقط.
-        async function uploadDataUrlToStorage(dataUrl, folder) {
-            if (!cloudUid || !dataUrl || !dataUrl.startsWith('data:')) return dataUrl; // بدون حساب مسجل، أبقِ القيمة كما هي محلياً
-            try {
-                const storageRef = firebase.storage().ref();
-                const path = `users/${cloudUid}/${folder}/${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-                const fileRef = storageRef.child(path);
-                await fileRef.putString(dataUrl, 'data_url');
-                const url = await fileRef.getDownloadURL();
-                return url;
-            } catch (err) {
-                console.error('تعذر رفع الملف إلى Firebase Storage:', err);
-                return dataUrl; // فشل الرفع؟ نحتفظ بالنسخة المحلية بدل فقدانها
-            }
+        // ضغط أي صورة (Base64) قبل حفظها محلياً وسحابياً: تصغير الأبعاد وإعادة الترميز بجودة JPEG معقولة.
+        // هذا هو الإصلاح المجاني البديل عن Firebase Storage (المدفوع الآن): صورة كاميرا كاملة الدقة
+        // (قد تتجاوز 3-5MB كنص Base64) تتحول بعد الضغط إلى أقل بكثير من 1MB بشكل يكاد يكون مضموناً.
+        function compressImageDataUrl(dataUrl, maxDim = 1100, quality = 0.72) {
+            return new Promise((resolve) => {
+                try {
+                    const img = new Image();
+                    img.onload = () => {
+                        let { width, height } = img;
+                        if (width > maxDim || height > maxDim) {
+                            if (width >= height) { height = Math.round(height * maxDim / width); width = maxDim; }
+                            else { width = Math.round(width * maxDim / height); height = maxDim; }
+                        }
+                        const canvas = document.createElement('canvas');
+                        canvas.width = width; canvas.height = height;
+                        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+                        try {
+                            resolve(canvas.toDataURL('image/jpeg', quality));
+                        } catch (e) {
+                            resolve(dataUrl); // فشل الترميز (مثلاً صورة PNG شفافة معقدة)؟ استخدم الأصل
+                        }
+                    };
+                    img.onerror = () => resolve(dataUrl);
+                    img.src = dataUrl;
+                } catch (err) {
+                    resolve(dataUrl);
+                }
+            });
         }
 
         // ============ نظام الأصوات التفاعلية (بدون ملفات خارجية) ============
@@ -978,8 +990,8 @@
                     const dataUrl = reader.result;
                     onImageChange(dataUrl); // معاينة فورية محلياً
                     setUploadingImage(true);
-                    const url = await uploadDataUrlToStorage(dataUrl, 'card-images');
-                    onImageChange(url); // نستبدلها برابط خفيف بعد الرفع لتفادي تضخم بيانات المزامنة
+                    const compressed = await compressImageDataUrl(dataUrl);
+                    onImageChange(compressed); // نستبدلها بنسخة مضغوطة أصغر بكثير لتفادي تضخم بيانات المزامنة
                     setUploadingImage(false);
                 };
                 reader.readAsDataURL(file);
@@ -989,14 +1001,7 @@
                 const file = e.target.files[0];
                 if (!file) return;
                 const reader = new FileReader();
-                reader.onload = async () => {
-                    const dataUrl = reader.result;
-                    onAudioChange(dataUrl);
-                    setUploadingAudio(true);
-                    const url = await uploadDataUrlToStorage(dataUrl, 'card-audio');
-                    onAudioChange(url);
-                    setUploadingAudio(false);
-                };
+                reader.onload = () => { onAudioChange(reader.result); };
                 reader.readAsDataURL(file);
             };
 
@@ -1009,14 +1014,7 @@
                     recorder.onstop = () => {
                         const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
                         const reader = new FileReader();
-                        reader.onload = async () => {
-                            const dataUrl = reader.result;
-                            onAudioChange(dataUrl);
-                            setUploadingAudio(true);
-                            const url = await uploadDataUrlToStorage(dataUrl, 'card-audio');
-                            onAudioChange(url);
-                            setUploadingAudio(false);
-                        };
+                        reader.onload = () => { onAudioChange(reader.result); };
                         reader.readAsDataURL(blob);
                         stream.getTracks().forEach(t => t.stop());
                     };
@@ -2330,8 +2328,8 @@
                 } else if (isImage) {
                     reader.onload = async () => {
                         const dataUrl = reader.result;
-                        const url = await uploadDataUrlToStorage(dataUrl, 'reading-files');
-                        setPickedFile({ kind: 'image', content: url, mime });
+                        const compressed = await compressImageDataUrl(dataUrl);
+                        setPickedFile({ kind: 'image', content: compressed, mime });
                         setFilePickStatus('ready');
                     };
                     reader.readAsDataURL(file);
@@ -3790,14 +3788,26 @@
                         setUser(u);
                         setAuthState('syncing');
                         try {
-                            const docSnap = await firebase.firestore().collection('users').doc(u.uid).get();
-                            if (docSnap.exists) {
-                                const data = docSnap.data();
-                                Object.keys(data).forEach(key => {
-                                    if (typeof data[key] === 'string') {
-                                        try { localStorage.setItem(key, data[key]); } catch (e) { /* تجاهل */ }
+                            // البنية الجديدة: كل مفتاح بيانات محفوظ كمستند مستقل تحت users/{uid}/data/{key}
+                            const dataSnap = await firebase.firestore().collection('users').doc(u.uid).collection('data').get();
+                            if (!dataSnap.empty) {
+                                dataSnap.forEach(docSnap => {
+                                    const d = docSnap.data();
+                                    if (d && typeof d.value === 'string') {
+                                        try { localStorage.setItem(docSnap.id, d.value); } catch (e) { /* تجاهل */ }
                                     }
                                 });
+                            } else {
+                                // توافق مع البنية القديمة (مستند واحد ضخم) إن وُجدت، كخطوة انتقالية تلقائية لمرة واحدة
+                                const oldDocSnap = await firebase.firestore().collection('users').doc(u.uid).get();
+                                if (oldDocSnap.exists) {
+                                    const oldData = oldDocSnap.data();
+                                    Object.keys(oldData).forEach(key => {
+                                        if (typeof oldData[key] === 'string') {
+                                            try { localStorage.setItem(key, oldData[key]); } catch (e) { /* تجاهل */ }
+                                        }
+                                    });
+                                }
                             }
                         } catch (err) {
                             console.error('تعذر تحميل البيانات من السحابة:', err);
