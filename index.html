@@ -125,29 +125,36 @@
         // ضغط أي صورة (Base64) قبل حفظها محلياً وسحابياً: تصغير الأبعاد وإعادة الترميز بجودة JPEG معقولة.
         // هذا هو الإصلاح المجاني البديل عن Firebase Storage (المدفوع الآن): صورة كاميرا كاملة الدقة
         // (قد تتجاوز 3-5MB كنص Base64) تتحول بعد الضغط إلى أقل بكثير من 1MB بشكل يكاد يكون مضموناً.
-        function compressImageDataUrl(dataUrl, maxDim = 1100, quality = 0.72) {
+        function compressImageDataUrl(dataUrl, maxDim = 900, quality = 0.65) {
             return new Promise((resolve) => {
+                let settled = false;
+                const finish = (val) => { if (!settled) { settled = true; resolve(val); } };
+                // مهلة أمان: لو تعطلت المعالجة لأي سبب (جهاز بطيء، صورة كبيرة جداً)، لا نترك المستخدم منتظراً للأبد
+                const safetyTimer = setTimeout(() => finish(dataUrl), 8000);
                 try {
                     const img = new Image();
                     img.onload = () => {
-                        let { width, height } = img;
-                        if (width > maxDim || height > maxDim) {
-                            if (width >= height) { height = Math.round(height * maxDim / width); width = maxDim; }
-                            else { width = Math.round(width * maxDim / height); height = maxDim; }
-                        }
-                        const canvas = document.createElement('canvas');
-                        canvas.width = width; canvas.height = height;
-                        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
                         try {
-                            resolve(canvas.toDataURL('image/jpeg', quality));
+                            let { width, height } = img;
+                            if (width > maxDim || height > maxDim) {
+                                if (width >= height) { height = Math.round(height * maxDim / width); width = maxDim; }
+                                else { width = Math.round(width * maxDim / height); height = maxDim; }
+                            }
+                            const canvas = document.createElement('canvas');
+                            canvas.width = width; canvas.height = height;
+                            canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+                            clearTimeout(safetyTimer);
+                            finish(canvas.toDataURL('image/jpeg', quality));
                         } catch (e) {
-                            resolve(dataUrl); // فشل الترميز (مثلاً صورة PNG شفافة معقدة)؟ استخدم الأصل
+                            clearTimeout(safetyTimer);
+                            finish(dataUrl); // فشل الترميز؟ استخدم الأصل بدل فقدان الصورة
                         }
                     };
-                    img.onerror = () => resolve(dataUrl);
+                    img.onerror = () => { clearTimeout(safetyTimer); finish(dataUrl); };
                     img.src = dataUrl;
                 } catch (err) {
-                    resolve(dataUrl);
+                    clearTimeout(safetyTimer);
+                    finish(dataUrl);
                 }
             });
         }
@@ -227,7 +234,7 @@
                     const page = await pdf.getPage(i);
                     const textContent = await page.getTextContent();
                     const pageText = textContent.items.map(item => item.str).join(' ');
-                    fullText += `--- صفحة ${i} ---\n${pageText}\n\n`;
+                    fullText += `--- Page ${i} ---\n${pageText}\n\n`;
                 }
                 return fullText.trim();
             } catch (err) {
@@ -971,7 +978,7 @@
         // ==========================================
         // مكوّن مساعد: إضافة صورة أو تسجيل صوتي من الملفات لأي حقل (وجه أمامي/خلفي...الخ)
         // ==========================================
-        function MediaAttachments({ image, onImageChange, audio, onAudioChange, hideImage = false, onUploadingChange }) {
+        function MediaAttachments({ image, onImageChange, audio, onAudioChange, hideImage = false, hideAudio = false, onUploadingChange }) {
             const fileInputRef = useRef(null);
             const audioInputRef = useRef(null);
             const mediaRecorderRef = useRef(null);
@@ -1044,18 +1051,22 @@
                         )}
 
                         <input type="file" accept="audio/*" ref={audioInputRef} onChange={handleAudioFilePick} class="hidden" />
-                        <button type="button" onClick={() => audioInputRef.current.click()} class="flex items-center gap-1 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-200 px-3 py-1.5 rounded-lg text-[11px] font-bold">
-                            <i data-lucide="upload" class="w-3.5 h-3.5"></i> رفع صوت
-                        </button>
+                        {!hideAudio && (
+                            <React.Fragment>
+                                <button type="button" onClick={() => audioInputRef.current.click()} class="flex items-center gap-1 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-200 px-3 py-1.5 rounded-lg text-[11px] font-bold">
+                                    <i data-lucide="upload" class="w-3.5 h-3.5"></i> رفع صوت
+                                </button>
 
-                        {!isRecording ? (
-                            <button type="button" onClick={startRecording} class="flex items-center gap-1 bg-red-50 text-red-500 px-3 py-1.5 rounded-lg text-[11px] font-bold">
-                                <i data-lucide="mic" class="w-3.5 h-3.5"></i> تسجيل صوت
-                            </button>
-                        ) : (
-                            <button type="button" onClick={stopRecording} class="flex items-center gap-1 bg-red-500 text-white px-3 py-1.5 rounded-lg text-[11px] font-bold animate-pulse">
-                                <i data-lucide="square" class="w-3.5 h-3.5"></i> إيقاف التسجيل
-                            </button>
+                                {!isRecording ? (
+                                    <button type="button" onClick={startRecording} class="flex items-center gap-1 bg-red-50 text-red-500 px-3 py-1.5 rounded-lg text-[11px] font-bold">
+                                        <i data-lucide="mic" class="w-3.5 h-3.5"></i> تسجيل صوت
+                                    </button>
+                                ) : (
+                                    <button type="button" onClick={stopRecording} class="flex items-center gap-1 bg-red-500 text-white px-3 py-1.5 rounded-lg text-[11px] font-bold animate-pulse">
+                                        <i data-lucide="square" class="w-3.5 h-3.5"></i> إيقاف التسجيل
+                                    </button>
+                                )}
+                            </React.Fragment>
                         )}
                     </div>
                     {!hideImage && image && (
@@ -1069,7 +1080,7 @@
                             <button type="button" onClick={() => onImageChange(null)} class="absolute -top-1.5 -left-1.5 bg-slate-800 text-white rounded-full w-4 h-4 flex items-center justify-center text-[9px]">×</button>
                         </div>
                     )}
-                    {audio && (
+                    {!hideAudio && audio && (
                         <div class="flex items-center gap-2">
                             <audio controls src={audio} class="h-8 max-w-[220px]"></audio>
                             {uploadingAudio && <span class="text-[10px] text-slate-400">جارٍ الرفع...</span>}
@@ -1093,6 +1104,8 @@
             const [copyTargetUnitId, setCopyTargetUnitId] = useState(null);
             const [copyClassification, setCopyClassification] = useState('Noun');
             const [copyNewUnitName, setCopyNewUnitName] = useState('');
+            const [isPickingWord, setIsPickingWord] = useState(false);
+            const [pickWordUnitId, setPickWordUnitId] = useState(null);
 
             // Inputs
             const [newDeckTitle, setNewDeckTitle] = useState('');
@@ -1113,7 +1126,7 @@
             const [currentCardIndex, setCurrentCardIndex] = useState(0);
             const [revealAnswer, setRevealAnswer] = useState(false);
 
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [isReviewing, managingDeck, isAddingCard, isAddingDeck, selectedDeck, decks.length, copyingCard]);
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [isReviewing, managingDeck, isAddingCard, isAddingDeck, selectedDeck, decks.length, copyingCard, isPickingWord]);
 
             // Statistics computation
             const stats = useMemo(() => {
@@ -1201,7 +1214,7 @@
             // نسخ كلمة من بطاقة SRS إلى قسم "ممارسة المفردات" مع تحديد تصنيفها (اسم/فعل)
             const handleConfirmCopyToPractice = () => {
                 if (!copyingCard) return;
-                const wordText = copyingCard.front.trim() || copyingCard.back.trim();
+                const wordText = copyingCard.back.trim() || copyingCard.front.trim();
                 if (!wordText) { alert('لا يوجد نص بهذه البطاقة لنسخه.'); return; }
 
                 let targetUnitId = copyTargetUnitId;
@@ -1219,7 +1232,8 @@
                     id: Date.now().toString() + '_c',
                     text: wordText,
                     classification: copyClassification,
-                    boxes: [false, false, false, false, false]
+                    boxes: [false, false, false, false, false],
+                    priority: null
                 };
 
                 setWordUnits(nextUnits.map(u => u.id === targetUnitId ? { ...u, words: [...u.words, newWord] } : u));
@@ -1459,7 +1473,7 @@
                         <div class="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
                             <div class="bg-white dark:bg-slate-800 w-full max-w-sm rounded-3xl p-6 space-y-4">
                                 <div class="flex justify-between items-center">
-                                    <h3 class="text-lg font-bold">نسخ "{copyingCard.front || copyingCard.back}" إلى ممارسة المفردات</h3>
+                                    <h3 class="text-lg font-bold">نسخ "{copyingCard.back || copyingCard.front}" إلى ممارسة المفردات</h3>
                                     <BackButton onClick={() => setCopyingCard(null)} label="إغلاق" />
                                 </div>
 
@@ -1476,16 +1490,58 @@
 
                                 <div class="space-y-2">
                                     <label class="text-[11px] font-bold text-slate-500">تصنيف الكلمة:</label>
-                                    <div class="flex gap-2">
-                                        <button onClick={() => setCopyClassification('Noun')} class={`flex-1 py-2 rounded-lg text-xs font-bold ${copyClassification === 'Noun' ? 'bg-primary-500 text-white' : 'bg-slate-100 text-slate-600'}`}>اسم (Noun)</button>
-                                        <button onClick={() => setCopyClassification('Verb')} class={`flex-1 py-2 rounded-lg text-xs font-bold ${copyClassification === 'Verb' ? 'bg-primary-500 text-white' : 'bg-slate-100 text-slate-600'}`}>فعل (Verb)</button>
-                                    </div>
+                                    <select value={copyClassification} onChange={(e) => setCopyClassification(e.target.value)} class="w-full border p-3 rounded-xl text-sm bg-white">
+                                        <option value="Noun">Noun (اسم)</option>
+                                        <option value="Verb">Verb (فعل)</option>
+                                        <option value="Adjective">Adjective (صفة)</option>
+                                        <option value="Adverb">Adverb (ظرف)</option>
+                                        <option value="Preposition">Preposition (حرف جر)</option>
+                                        <option value="Conjunction">Conjunction (حرف عطف)</option>
+                                        <option value="Interjection">Interjection (حرف تعجب)</option>
+                                    </select>
                                 </div>
 
                                 <div class="flex justify-end gap-2">
                                     <button onClick={() => setCopyingCard(null)} class="px-4 py-2 text-slate-500">إلغاء</button>
                                     <button onClick={handleConfirmCopyToPractice} class="bg-primary-500 text-white px-5 py-2 rounded-xl font-bold">نسخ</button>
                                 </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Pick word from Word Practice section to insert into card */}
+                    {isPickingWord && (
+                        <div class="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
+                            <div class="bg-white dark:bg-slate-800 w-full max-w-sm rounded-3xl p-6 space-y-4 max-h-[80vh] flex flex-col">
+                                <div class="flex justify-between items-center">
+                                    <h3 class="text-lg font-bold">اختر كلمة من ممارسة المفردات</h3>
+                                    <BackButton onClick={() => setIsPickingWord(false)} label="إغلاق" />
+                                </div>
+
+                                {wordUnits.length === 0 ? (
+                                    <p class="text-xs text-slate-400 text-center py-6">لا توجد رزم في قسم ممارسة المفردات بعد.</p>
+                                ) : (
+                                    <>
+                                        <select value={pickWordUnitId || ''} onChange={(e) => setPickWordUnitId(e.target.value)} class="w-full border p-3 rounded-xl text-sm">
+                                            {wordUnits.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+                                        </select>
+                                        <div class="flex-1 overflow-y-auto space-y-2">
+                                            {wordUnits.find(u => u.id === pickWordUnitId)?.words.map(w => (
+                                                <button
+                                                    key={w.id}
+                                                    onClick={() => { setFrontText(w.text); playSoftClick(); setIsPickingWord(false); }}
+                                                    class="w-full text-right p-3 bg-slate-50 hover:bg-primary-50 rounded-xl text-sm flex justify-between items-center"
+                                                >
+                                                    <span class="font-bold font-inter">{w.text}</span>
+                                                    <span class="text-[10px] px-2 py-0.5 rounded-full bg-slate-200 text-slate-600">{w.classification}</span>
+                                                </button>
+                                            ))}
+                                            {wordUnits.find(u => u.id === pickWordUnitId)?.words.length === 0 && (
+                                                <p class="text-xs text-slate-400 text-center py-6">لا توجد كلمات في هذه الرزمة.</p>
+                                            )}
+                                        </div>
+                                    </>
+                                )}
                             </div>
                         </div>
                     )}
@@ -1508,11 +1564,16 @@
                                         onChange={(e) => setFrontText(e.target.value)}
                                         class="w-full border border-slate-200 dark:border-slate-700 p-3 rounded-xl text-sm"
                                     />
-                                    <MediaAttachments image={frontImage} onImageChange={setFrontImage} audio={frontAudio} onAudioChange={setFrontAudio} onUploadingChange={setFrontUploading} />
+                                    <MediaAttachments image={frontImage} onImageChange={setFrontImage} audio={frontAudio} onAudioChange={setFrontAudio} onUploadingChange={setFrontUploading} hideAudio={true} />
                                 </div>
 
                                 <div class="space-y-2 p-3 bg-slate-50 dark:bg-slate-900 rounded-xl">
-                                    <label class="text-[11px] font-bold text-slate-500">الوجه الخلفي</label>
+                                    <div class="flex items-center justify-between">
+                                        <label class="text-[11px] font-bold text-slate-500">الوجه الخلفي</label>
+                                        <button type="button" onClick={() => { setIsPickingWord(true); setPickWordUnitId(wordUnits[0]?.id || null); }} class="flex items-center gap-1 bg-primary-50 text-primary-600 px-2.5 py-1 rounded-lg text-[11px] font-bold">
+                                            <i data-lucide="list-plus" class="w-3.5 h-3.5"></i> كلمات
+                                        </button>
+                                    </div>
                                     <input
                                         type="text"
                                         placeholder="نص الوجه الخلفي (مثلاً: الترجمة والمعنى)..."
@@ -1520,7 +1581,7 @@
                                         onChange={(e) => setBackText(e.target.value)}
                                         class="w-full border border-slate-200 dark:border-slate-700 p-3 rounded-xl text-sm"
                                     />
-                                    <MediaAttachments image={backImage} onImageChange={setBackImage} audio={backAudio} onAudioChange={setBackAudio} onUploadingChange={setBackUploading} />
+                                    <MediaAttachments image={backImage} onImageChange={setBackImage} audio={backAudio} onAudioChange={setBackAudio} onUploadingChange={setBackUploading} hideAudio={true} />
                                 </div>
 
                                 <div class="flex justify-end gap-2">
@@ -1802,7 +1863,8 @@
                     id: Date.now().toString(),
                     text: wordText,
                     classification: wordClassification,
-                    boxes: [false, false, false, false, false]
+                    boxes: [false, false, false, false, false],
+                    priority: null
                 };
 
                 setWordUnits(prev => prev.map(u => {
@@ -1814,6 +1876,34 @@
 
                 setWordText('');
                 setIsAddingWord(false);
+                setSelectedUnit(null); // العودة مباشرة لوجهة الممارسة (الشاشة الرئيسية) بدل قائمة الكلمات
+            };
+
+            const handleDeleteWord = (unitId, wordId) => {
+                if (!confirm('هل تريد حذف هذه الكلمة؟')) return;
+                playHardClick();
+                setWordUnits(prev => prev.map(u => u.id === unitId ? { ...u, words: u.words.filter(w => w.id !== wordId) } : u));
+            };
+
+            // الأولوية: ضغطة تجعل الكلمة أولوية وتصعد للأعلى، وضغطة ثانية تلغي أولويتها فتعود لمكانها الطبيعي.
+            // الكلمة المُعطاة أولوية أولاً تبقى في القمة، وأي كلمة تالية تُعطى أولوية تظهر تحتها مباشرة.
+            const togglePriority = (unitId, wordId) => {
+                setWordUnits(prev => prev.map(u => {
+                    if (u.id !== unitId) return u;
+                    return {
+                        ...u,
+                        words: u.words.map(w => w.id === wordId ? { ...w, priority: w.priority ? null : Date.now() } : w)
+                    };
+                }));
+            };
+
+            const getSortedWords = (unit) => {
+                if (!unit) return [];
+                return [...unit.words].sort((a, b) => {
+                    const pa = a.priority || Infinity;
+                    const pb = b.priority || Infinity;
+                    return pa - pb;
+                });
             };
 
             return (
@@ -1858,22 +1948,30 @@
                                     <span class="w-10"></span>
                                 </div>
                                 <div class="flex-1 overflow-y-auto p-6 space-y-2.5">
-                                    {wordUnits.find(u => u.id === selectedUnit.id)?.words.map(word => (
-                                        <div key={word.id} class="w-full p-4 bg-slate-50 dark:bg-slate-900 rounded-2xl border border-slate-100 dark:border-slate-800 flex flex-wrap md:flex-nowrap justify-between items-center gap-3">
+                                    {getSortedWords(wordUnits.find(u => u.id === selectedUnit.id)).map(word => (
+                                        <div key={word.id} class={`w-full p-4 rounded-2xl border flex flex-wrap md:flex-nowrap justify-between items-center gap-3 ${word.priority ? 'bg-amber-50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-900' : 'bg-slate-50 dark:bg-slate-900 border-slate-100 dark:border-slate-800'}`}>
                                             <div class="flex items-center gap-2.5 shrink-0">
+                                                <button onClick={() => togglePriority(selectedUnit.id, word.id)} title={word.priority ? 'إلغاء الأولوية' : 'اجعلها أولوية'} class={word.priority ? 'text-amber-500' : 'text-slate-300 hover:text-amber-400'}>
+                                                    <i data-lucide="star" class={`w-4 h-4 ${word.priority ? 'fill-current' : ''}`}></i>
+                                                </button>
                                                 <span class="font-bold text-lg font-inter">{word.text}</span>
                                                 <span class="text-[10px] px-2 py-0.5 rounded-full font-bold bg-slate-200 text-slate-600">{word.classification}</span>
                                             </div>
-                                            <div class="flex gap-1.5">
-                                                {word.boxes.map((val, idx) => (
-                                                    <div
-                                                        key={idx}
-                                                        onClick={() => toggleWordCheck(selectedUnit.id, word.id, idx)}
-                                                        class={`w-6 h-6 rounded border cursor-pointer flex items-center justify-center transition-all ${val ? 'bg-primary-500 border-primary-500 text-white' : 'bg-white border-slate-200'}`}
-                                                    >
-                                                        {val && '✓'}
-                                                    </div>
-                                                ))}
+                                            <div class="flex items-center gap-3">
+                                                <div class="flex gap-1.5">
+                                                    {word.boxes.map((val, idx) => (
+                                                        <div
+                                                            key={idx}
+                                                            onClick={() => toggleWordCheck(selectedUnit.id, word.id, idx)}
+                                                            class={`w-6 h-6 rounded border cursor-pointer flex items-center justify-center transition-all ${val ? 'bg-primary-500 border-primary-500 text-white' : 'bg-white border-slate-200'}`}
+                                                        >
+                                                            {val && '✓'}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                                <button onClick={() => handleDeleteWord(selectedUnit.id, word.id)} class="text-slate-300 hover:text-red-500">
+                                                    <i data-lucide="trash-2" class="w-4 h-4"></i>
+                                                </button>
                                             </div>
                                         </div>
                                     ))}
@@ -2151,64 +2249,6 @@
         }
 
         // بطاقة عرض ملف واحد بنمط "Document Card"
-        // عرض كل صفحات ملف PDF (وليس الأولى فقط) بشكل عمودي قابل للتمرير
-        function PdfPagesViewer({ dataUrl }) {
-            const containerRef = useRef(null);
-            const [status, setStatus] = useState('loading'); // loading | ready | error
-
-            useEffect(() => {
-                let cancelled = false;
-                async function renderAll() {
-                    setStatus('loading');
-                    try {
-                        if (!window['pdfjsLib']) { setStatus('error'); return; }
-                        const pdf = await window['pdfjsLib'].getDocument(dataUrl).promise;
-                        if (cancelled) return;
-                        const container = containerRef.current;
-                        if (!container) return;
-                        container.innerHTML = '';
-                        for (let i = 1; i <= pdf.numPages; i++) {
-                            const page = await pdf.getPage(i);
-                            const viewport = page.getViewport({ scale: 1.4 });
-                            const canvas = document.createElement('canvas');
-                            canvas.width = viewport.width;
-                            canvas.height = viewport.height;
-                            canvas.style.width = '100%';
-                            canvas.style.height = 'auto';
-                            canvas.style.display = 'block';
-                            canvas.style.marginBottom = '14px';
-                            canvas.style.borderRadius = '10px';
-                            canvas.style.border = '1px solid #e2e8f0';
-                            container.appendChild(canvas);
-                            await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-                            if (cancelled) return;
-                        }
-                        if (!cancelled) setStatus('ready');
-                    } catch (err) {
-                        console.error('تعذر عرض صفحات ملف PDF:', err);
-                        if (!cancelled) setStatus('error');
-                    }
-                }
-                renderAll();
-                return () => { cancelled = true; };
-            }, [dataUrl]);
-
-            return (
-                <div>
-                    {status === 'loading' && (
-                        <div class="flex items-center justify-center h-40 text-slate-400 text-xs gap-2">
-                            <div class="w-5 h-5 border-2 border-primary-500 border-t-transparent rounded-full animate-spin"></div>
-                            جارٍ تحميل كل صفحات الملف...
-                        </div>
-                    )}
-                    {status === 'error' && (
-                        <p class="text-xs text-red-500 text-center py-6">تعذر عرض هذا الملف كصفحات، جرب "فتح في نافذة كاملة" أو "تنزيل الملف" بالأسفل.</p>
-                    )}
-                    <div ref={containerRef} class="w-full"></div>
-                </div>
-            );
-        }
-
         function DocumentCard({ file, onOpen, onDelete, onFinish, allowFinish }) {
             const kindMeta = {
                 text: { icon: 'file-text', label: 'نص', color: 'text-blue-500 bg-blue-50' },
@@ -2268,7 +2308,6 @@
             const [viewingFileId, setViewingFileId] = useState(null);
             const [isEditingText, setIsEditingText] = useState(false);
             const [editDraft, setEditDraft] = useState('');
-            const [pdfViewMode, setPdfViewMode] = useState('pages'); // pages | text (لملفات PDF فقط)
 
             const [unitName, setUnitName] = useState('');
             const [fileName, setFileName] = useState('');
@@ -2278,8 +2317,8 @@
             const [filePickStatus, setFilePickStatus] = useState('idle'); // idle | loading | ready | error
             const fileInputRef = useRef(null);
 
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [selectedUnitId, viewingFileId, isAddingUnit, isAddingFile, pdfViewMode, isEditingText, filePickStatus]);
-            useEffect(() => { setPdfViewMode('pages'); setIsEditingText(false); }, [viewingFileId]);
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [selectedUnitId, viewingFileId, isAddingUnit, isAddingFile, isEditingText, filePickStatus]);
+            useEffect(() => { setIsEditingText(false); }, [viewingFileId]);
 
             // نشتق البيانات الحيّة دائماً من قائمة units بدل الاحتفاظ بنسخة قديمة منفصلة،
             // هذا يضمن أن أي ملف جديد أو تعديل يظهر فوراً دون الحاجة لإعادة فتح الصفحة
@@ -2517,19 +2556,11 @@
                                 />
                             )}
                             {viewingFile.kind === 'image' && (
-                                <div class="space-y-2">
-                                    <div class="flex gap-2 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl w-fit mx-auto">
-                                        <button onClick={() => { setPdfViewMode('pages'); setIsEditingText(false); }} class={`px-4 py-1.5 rounded-lg text-xs font-bold ${pdfViewMode === 'pages' ? 'bg-white dark:bg-slate-700 shadow-sm text-primary-600' : 'text-slate-500'}`}>🖼️ عرض الصورة</button>
-                                        <button onClick={() => { setPdfViewMode('text'); setIsEditingText(false); }} class={`px-4 py-1.5 rounded-lg text-xs font-bold ${pdfViewMode === 'text' ? 'bg-white dark:bg-slate-700 shadow-sm text-primary-600' : 'text-slate-500'}`}>✍️ الكتابة والحذف والترجمة</button>
-                                    </div>
-
-                                    {pdfViewMode === 'pages' && (
-                                        <img src={viewingFile.content} class="w-full rounded-xl border" />
-                                    )}
-
-                                    {pdfViewMode === 'text' && !isEditingText && (
+                                <div class="space-y-3">
+                                    <img src={viewingFile.content} class="w-full rounded-xl border" />
+                                    {!isEditingText && (
                                         viewingFile.extractedText && viewingFile.extractedText.trim() ? (
-                                            <p class="text-base leading-relaxed text-slate-700 dark:text-slate-200 select-text notebook-paper p-4 rounded-xl whitespace-pre-wrap">{viewingFile.extractedText}</p>
+                                            <p dir="ltr" class="text-base leading-relaxed text-slate-700 dark:text-slate-200 select-text notebook-paper p-4 rounded-xl whitespace-pre-wrap text-left">{viewingFile.extractedText}</p>
                                         ) : (
                                             <div class="text-center p-6 notebook-paper rounded-xl space-y-2">
                                                 <p class="text-xs text-slate-500">لا يوجد نص مكتوب لهذه الصورة بعد.</p>
@@ -2537,33 +2568,25 @@
                                             </div>
                                         )
                                     )}
-                                    {pdfViewMode === 'text' && isEditingText && (
+                                    {isEditingText && (
                                         <textarea
+                                            dir="ltr"
                                             value={editDraft}
                                             onChange={(e) => setEditDraft(e.target.value)}
                                             placeholder="اكتب أو الصق النص الموجود بالصورة هنا يدوياً..."
-                                            class="w-full h-64 text-base leading-relaxed text-slate-700 notebook-paper p-4 rounded-xl border border-primary-300 focus:outline-none focus:ring-2 focus:ring-primary-400"
+                                            class="w-full h-64 text-base leading-relaxed text-slate-700 notebook-paper p-4 rounded-xl border border-primary-300 focus:outline-none focus:ring-2 focus:ring-primary-400 text-left"
                                         />
                                     )}
                                 </div>
                             )}
                             {viewingFile.kind === 'pdf' && (
-                                <div class="space-y-2">
-                                    <div class="flex gap-2 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl w-fit mx-auto">
-                                        <button onClick={() => { setPdfViewMode('pages'); setIsEditingText(false); }} class={`px-4 py-1.5 rounded-lg text-xs font-bold ${pdfViewMode === 'pages' ? 'bg-white dark:bg-slate-700 shadow-sm text-primary-600' : 'text-slate-500'}`}>📄 عرض الملف</button>
-                                        <button onClick={() => { setPdfViewMode('text'); setIsEditingText(false); }} class={`px-4 py-1.5 rounded-lg text-xs font-bold ${pdfViewMode === 'text' ? 'bg-white dark:bg-slate-700 shadow-sm text-primary-600' : 'text-slate-500'}`}>✍️ الكتابة والحذف والترجمة</button>
-                                    </div>
-
-                                    {pdfViewMode === 'pages' && (
-                                        <>
-                                            <PdfPagesViewer dataUrl={viewingFile.content} />
-                                            <a href={viewingFile.content} download={viewingFile.name} class="block text-center bg-primary-500 text-white text-xs px-4 py-2 rounded-lg font-bold">تنزيل الملف</a>
-                                        </>
-                                    )}
-
-                                    {pdfViewMode === 'text' && !isEditingText && (
+                                <div class="space-y-3">
+                                    <a href={viewingFile.content} download={viewingFile.name} class="flex items-center justify-center gap-1.5 bg-slate-100 text-slate-600 text-xs px-4 py-2 rounded-lg font-bold">
+                                        <i data-lucide="download" class="w-3.5 h-3.5"></i> تنزيل الملف الأصلي (PDF)
+                                    </a>
+                                    {!isEditingText && (
                                         viewingFile.extractedText && viewingFile.extractedText.trim() ? (
-                                            <p class="text-base leading-relaxed text-slate-700 dark:text-slate-200 select-text notebook-paper p-4 rounded-xl whitespace-pre-wrap">{viewingFile.extractedText}</p>
+                                            <p dir="ltr" class="text-base leading-relaxed text-slate-700 dark:text-slate-200 select-text notebook-paper p-4 rounded-xl whitespace-pre-wrap text-left">{viewingFile.extractedText}</p>
                                         ) : (
                                             <div class="text-center p-6 notebook-paper rounded-xl space-y-2">
                                                 <p class="text-xs text-slate-500">هذا الملف على الأغلب صور ممسوحة ضوئياً بدون نص قابل للاستخراج تلقائياً.</p>
@@ -2571,12 +2594,13 @@
                                             </div>
                                         )
                                     )}
-                                    {pdfViewMode === 'text' && isEditingText && (
+                                    {isEditingText && (
                                         <textarea
+                                            dir="ltr"
                                             value={editDraft}
                                             onChange={(e) => setEditDraft(e.target.value)}
                                             placeholder="اكتب أو الصق نص هذا الملف هنا يدوياً..."
-                                            class="w-full h-64 text-base leading-relaxed text-slate-700 notebook-paper p-4 rounded-xl border border-primary-300 focus:outline-none focus:ring-2 focus:ring-primary-400"
+                                            class="w-full h-64 text-base leading-relaxed text-slate-700 notebook-paper p-4 rounded-xl border border-primary-300 focus:outline-none focus:ring-2 focus:ring-primary-400 text-left"
                                         />
                                     )}
                                 </div>
@@ -2588,7 +2612,7 @@
                                 </div>
                             )}
 
-                            {(viewingFile.kind === 'text' || ((viewingFile.kind === 'pdf' || viewingFile.kind === 'image') && pdfViewMode === 'text')) && (
+                            {(viewingFile.kind === 'text' || viewingFile.kind === 'pdf' || viewingFile.kind === 'image') && (
                                 <div class="flex flex-wrap gap-2">
                                     {!isEditingText && (
                                         <>
