@@ -122,47 +122,70 @@
             decksSyncTimer = setTimeout(() => syncDecksNow(decks), 1500);
         }
 
+        // ينظّف أي كائن من قيم undefined قبل إرساله لـ Firestore (Firestore يرمي خطأ متزامناً
+        // غير قابل للالتقاط بـ.catch() العادية لو صادف حقل بقيمة undefined، مما كان يوقف كامل
+        // عملية المزامنة بصمت تام بدون أي تنبيه للمستخدم - وهذا هو السبب الحقيقي للمشكلة)
+        function sanitizeForFirestore(obj) {
+            if (obj === undefined) return null;
+            if (obj === null || typeof obj !== 'object') return obj;
+            if (Array.isArray(obj)) return obj.map(sanitizeForFirestore);
+            const clean = {};
+            Object.keys(obj).forEach(k => {
+                const v = obj[k];
+                clean[k] = v === undefined ? null : sanitizeForFirestore(v);
+            });
+            return clean;
+        }
+
         async function syncDecksNow(decks) {
             if (!cloudUid) return;
-            const userRef = firebase.firestore().collection('users').doc(cloudUid);
-            const currentDeckIds = new Set(decks.map(d => d.id));
-            const currentCardIds = new Set();
-            const failedCards = [];
-            const writes = [];
+            try {
+                const userRef = firebase.firestore().collection('users').doc(cloudUid);
+                const currentDeckIds = new Set(decks.map(d => d.id));
+                const currentCardIds = new Set();
+                const failedCards = [];
+                const writes = [];
 
-            decks.forEach((deck, idx) => {
-                const cardIds = deck.cards.map(c => c.id);
-                cardIds.forEach(id => currentCardIds.add(id));
+                decks.forEach((deck, idx) => {
+                    const cards = deck.cards || [];
+                    const cardIds = cards.map(c => c.id);
+                    cardIds.forEach(id => currentCardIds.add(id));
 
-                writes.push(
-                    userRef.collection('deckMeta').doc(deck.id).set({ name: deck.name, order: idx, cardIds })
-                        .catch(err => console.error('فشل مزامنة بيانات رزمة:', deck.id, err))
-                );
-
-                deck.cards.forEach(card => {
                     writes.push(
-                        userRef.collection('cards').doc(card.id).set({ ...card, deckId: deck.id })
-                            .catch(err => {
-                                console.error('فشل مزامنة بطاقة واحدة:', card.id, err);
-                                failedCards.push(card.front || card.id);
-                            })
+                        userRef.collection('deckMeta').doc(deck.id).set(sanitizeForFirestore({ title: deck.title, order: idx, cardIds }))
+                            .catch(err => console.error('فشل مزامنة بيانات رزمة:', deck.id, err))
                     );
+
+                    cards.forEach(card => {
+                        writes.push(
+                            userRef.collection('cards').doc(card.id).set(sanitizeForFirestore({ ...card, deckId: deck.id }))
+                                .catch(err => {
+                                    console.error('فشل مزامنة بطاقة واحدة:', card.id, err);
+                                    failedCards.push(card.front || card.id);
+                                })
+                        );
+                    });
                 });
-            });
 
-            // حذف أي رزمة أو بطاقة أُزيلت محلياً من نسخة السحابة أيضاً
-            previousDeckIds.forEach(id => { if (!currentDeckIds.has(id)) writes.push(userRef.collection('deckMeta').doc(id).delete().catch(() => {})); });
-            previousCardIds.forEach(id => { if (!currentCardIds.has(id)) writes.push(userRef.collection('cards').doc(id).delete().catch(() => {})); });
+                // حذف أي رزمة أو بطاقة أُزيلت محلياً من نسخة السحابة أيضاً
+                previousDeckIds.forEach(id => { if (!currentDeckIds.has(id)) writes.push(userRef.collection('deckMeta').doc(id).delete().catch(() => {})); });
+                previousCardIds.forEach(id => { if (!currentCardIds.has(id)) writes.push(userRef.collection('cards').doc(id).delete().catch(() => {})); });
 
-            previousDeckIds = currentDeckIds;
-            previousCardIds = currentCardIds;
+                previousDeckIds = currentDeckIds;
+                previousCardIds = currentCardIds;
 
-            await Promise.allSettled(writes);
-            if (failedCards.length > 0) {
+                await Promise.allSettled(writes);
+                if (failedCards.length > 0) {
+                    window.lastCloudSyncOk = false;
+                    if (window.notifyCloudSyncFailure) window.notifyCloudSyncFailure(`بطاقة "${failedCards[0]}" (على الأغلب صورة كبيرة الحجم)`);
+                } else {
+                    window.lastCloudSyncOk = true;
+                }
+            } catch (err) {
+                // أي خطأ غير متوقع (حتى لو متزامن) يُلتقط هنا الآن ويظهر للمستخدم بدل الاختفاء الصامت
+                console.error('خطأ غير متوقع أثناء مزامنة البطاقات:', err);
                 window.lastCloudSyncOk = false;
-                if (window.notifyCloudSyncFailure) window.notifyCloudSyncFailure(`بطاقة "${failedCards[0]}" (على الأغلب صورة كبيرة الحجم)`);
-            } else {
-                window.lastCloudSyncOk = true;
+                if (window.notifyCloudSyncFailure) window.notifyCloudSyncFailure('خطأ غير متوقع في مزامنة البطاقات: ' + (err && err.message ? err.message : String(err)));
             }
         }
 
@@ -189,7 +212,7 @@
                 const ordered = [];
                 deckMetaSnap.forEach(docSnap => {
                     const meta = docSnap.data();
-                    ordered.push({ order: typeof meta.order === 'number' ? meta.order : 999, deck: { id: docSnap.id, name: meta.name, cards: cardsByDeck[docSnap.id] || [] } });
+                    ordered.push({ order: typeof meta.order === 'number' ? meta.order : 999, deck: { id: docSnap.id, title: meta.title, cards: cardsByDeck[docSnap.id] || [] } });
                 });
                 ordered.sort((a, b) => a.order - b.order);
                 const finalDecks = ordered.map(o => o.deck);
