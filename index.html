@@ -106,6 +106,104 @@
         // سابقاً، تجاوز أي مفتاح واحد لحد 1MB كان يُفشل مزامنة كل البيانات دفعة واحدة بصمت،
         // وأي جهاز آخر يفتح الحساب كان "يبلع" نسخة سحابية قديمة ناقصة فتختفي البطاقات الجديدة.
         // الآن: فشل مزامنة مفتاح واحد لا يؤثر على بقية المفاتيح، ويظهر تنبيه صريح يسمي المفتاح المتعطل.
+        // ============ مزامنة دقيقة لبطاقات SRS على مستوى البطاقة الواحدة ============
+        // المشكلة الجذرية: حتى بعد تقسيم البيانات حسب "المفتاح"، كل بطاقات الحفظ (srs_decks) كانت
+        // لا تزال تُرسل كـ"كتلة واحدة"، فإذا صور بطاقتين جديدتين جعلت الكتلة كاملة تتجاوز 1MB،
+        // تفشل مزامنة كل الرزم والبطاقات معاً دفعة واحدة - حتى القديمة السليمة.
+        // الحل: كل بطاقة تُخزَّن كمستند Firestore مستقل بذاته. فشل مزامنة بطاقة واحدة (صورة كبيرة
+        // مثلاً) لا يؤثر إطلاقاً على أي بطاقة أخرى، قديمة كانت أو جديدة.
+        let decksSyncTimer = null;
+        let previousDeckIds = new Set();
+        let previousCardIds = new Set();
+
+        function scheduleDecksSync(decks) {
+            if (!cloudUid) return;
+            if (decksSyncTimer) clearTimeout(decksSyncTimer);
+            decksSyncTimer = setTimeout(() => syncDecksNow(decks), 1500);
+        }
+
+        async function syncDecksNow(decks) {
+            if (!cloudUid) return;
+            const userRef = firebase.firestore().collection('users').doc(cloudUid);
+            const currentDeckIds = new Set(decks.map(d => d.id));
+            const currentCardIds = new Set();
+            const failedCards = [];
+            const writes = [];
+
+            decks.forEach((deck, idx) => {
+                const cardIds = deck.cards.map(c => c.id);
+                cardIds.forEach(id => currentCardIds.add(id));
+
+                writes.push(
+                    userRef.collection('deckMeta').doc(deck.id).set({ name: deck.name, order: idx, cardIds })
+                        .catch(err => console.error('فشل مزامنة بيانات رزمة:', deck.id, err))
+                );
+
+                deck.cards.forEach(card => {
+                    writes.push(
+                        userRef.collection('cards').doc(card.id).set({ ...card, deckId: deck.id })
+                            .catch(err => {
+                                console.error('فشل مزامنة بطاقة واحدة:', card.id, err);
+                                failedCards.push(card.front || card.id);
+                            })
+                    );
+                });
+            });
+
+            // حذف أي رزمة أو بطاقة أُزيلت محلياً من نسخة السحابة أيضاً
+            previousDeckIds.forEach(id => { if (!currentDeckIds.has(id)) writes.push(userRef.collection('deckMeta').doc(id).delete().catch(() => {})); });
+            previousCardIds.forEach(id => { if (!currentCardIds.has(id)) writes.push(userRef.collection('cards').doc(id).delete().catch(() => {})); });
+
+            previousDeckIds = currentDeckIds;
+            previousCardIds = currentCardIds;
+
+            await Promise.allSettled(writes);
+            if (failedCards.length > 0) {
+                window.lastCloudSyncOk = false;
+                if (window.notifyCloudSyncFailure) window.notifyCloudSyncFailure(`بطاقة "${failedCards[0]}" (على الأغلب صورة كبيرة الحجم)`);
+            } else {
+                window.lastCloudSyncOk = true;
+            }
+        }
+
+        // تحميل البطاقات من البنية الدقيقة الجديدة (رزمة + بطاقات منفصلة). يُستخدم عند تسجيل الدخول.
+        // يُعيد true لو وُجدت بيانات بهذه البنية، أو false لو لا (حساب جديد أو بيانات بالبنية القديمة).
+        async function loadDecksFromCloud(uid) {
+            try {
+                const userRef = firebase.firestore().collection('users').doc(uid);
+                const [deckMetaSnap, cardsSnap] = await Promise.all([
+                    userRef.collection('deckMeta').get(),
+                    userRef.collection('cards').get()
+                ]);
+                if (deckMetaSnap.empty) return false;
+
+                const cardsByDeck = {};
+                cardsSnap.forEach(docSnap => {
+                    const card = { id: docSnap.id, ...docSnap.data() };
+                    const deckId = card.deckId;
+                    delete card.deckId;
+                    if (!cardsByDeck[deckId]) cardsByDeck[deckId] = [];
+                    cardsByDeck[deckId].push(card);
+                });
+
+                const ordered = [];
+                deckMetaSnap.forEach(docSnap => {
+                    const meta = docSnap.data();
+                    ordered.push({ order: typeof meta.order === 'number' ? meta.order : 999, deck: { id: docSnap.id, name: meta.name, cards: cardsByDeck[docSnap.id] || [] } });
+                });
+                ordered.sort((a, b) => a.order - b.order);
+                const finalDecks = ordered.map(o => o.deck);
+
+                localStorage.setItem('srs_decks', JSON.stringify(finalDecks));
+                previousDeckIds = new Set(finalDecks.map(d => d.id));
+                previousCardIds = new Set(finalDecks.flatMap(d => d.cards.map(c => c.id)));
+                return true;
+            } catch (err) {
+                console.error('تعذر تحميل البطاقات من السحابة:', err);
+                return false;
+            }
+        }
+
         function scheduleCloudSync(key, value) {
             if (!cloudUid) return; // لا يوجد مستخدم مسجل دخول بعد
             if (cloudSyncTimers[key]) clearTimeout(cloudSyncTimers[key]);
@@ -515,7 +613,10 @@
             });
 
             // Save Databases to LocalStorage on Change
-            useEffect(() => { safeSetLocalStorage('srs_decks', JSON.stringify(decks)); }, [decks]);
+            useEffect(() => {
+                try { localStorage.setItem('srs_decks', JSON.stringify(decks)); } catch (err) { console.error('تعذر حفظ البطاقات محلياً:', err); }
+                scheduleDecksSync(decks); // مزامنة دقيقة على مستوى البطاقة الواحدة بدل الرزمة كاملة
+            }, [decks]);
             useEffect(() => { safeSetLocalStorage('word_units', JSON.stringify(wordUnits)); }, [wordUnits]);
             useEffect(() => { safeSetLocalStorage('completed_lessons', JSON.stringify(completedLessons)); }, [completedLessons]);
             useEffect(() => { safeSetLocalStorage('grammar_status', JSON.stringify(grammarStatus)); }, [grammarStatus]);
@@ -808,41 +909,6 @@
                             <div>
                                 <h3 class="text-2xl font-black font-inter">{streaks} يوم استمرارية</h3>
                                 <p class="text-sm opacity-90 mt-1">"استمر... كل يوم يقربك من هدفك الحقيقي."</p>
-                            </div>
-                        </div>
-                    </div>
-
-                    {/* Progress Circle & Study circle details */}
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        <div class="bg-white dark:bg-slate-800 border border-slate-100 dark:border-slate-700/50 rounded-3xl p-6 flex flex-col items-center justify-center text-center">
-                            <h3 class="text-lg font-bold text-slate-700 dark:text-slate-200 mb-4">Study Circle اليومية</h3>
-
-                            {/* SVG Progress Circle */}
-                            <div class="relative w-44 h-44 flex items-center justify-center">
-                                <svg class="w-full h-full transform -rotate-90">
-                                    <circle cx="88" cy="88" r="70" class="stroke-slate-100 dark:stroke-slate-700" stroke-width="12" fill="transparent" />
-                                    <circle cx="88" cy="88" r="70" class="stroke-primary-500 transition-all duration-500" stroke-width="12" fill="transparent"
-                                        stroke-dasharray={2 * Math.PI * 70}
-                                        stroke-dashoffset={(2 * Math.PI * 70) * (1 - currentProgressPercentage / 100)}
-                                    />
-                                </svg>
-                                <div class="absolute flex flex-col items-center">
-                                    <span class="text-3xl font-black text-slate-800 dark:text-white font-inter">{currentProgressPercentage}%</span>
-                                    <span class="text-xs text-slate-400">إنجاز اليوم</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* ملخص اليوم مع مؤقتات لكل مهارة */}
-                        <div class="bg-white dark:bg-slate-800 border border-slate-100 dark:border-slate-700/50 rounded-3xl p-6">
-                            <h3 class="text-lg font-bold text-slate-700 dark:text-slate-200 mb-4">ملخص نشاط اليوم</h3>
-                            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-                                <ActivityMetricItem icon="book-open" title="القراءة" value={`${Math.round(dailyProgress.reading)} دقيقة`} color="text-teal-500 bg-teal-50 dark:bg-teal-950/20" skillKey="reading" onAddSkillTime={onAddSkillTime} />
-                                <ActivityMetricItem icon="headphones" title="الاستماع" value={`${Math.round(dailyProgress.listening)} دقيقة`} color="text-blue-500 bg-blue-50 dark:bg-blue-950/20" skillKey="listening" onAddSkillTime={onAddSkillTime} />
-                                <ActivityMetricItem icon="mic" title="التحدث" value={`${Math.round(dailyProgress.speaking)} دقيقة`} color="text-orange-500 bg-orange-50 dark:bg-orange-950/20" skillKey="speaking" onAddSkillTime={onAddSkillTime} />
-                                <ActivityMetricItem icon="pen-tool" title="الكتابة" value={`${Math.round(dailyProgress.writing)} دقيقة`} color="text-pink-500 bg-pink-50 dark:bg-pink-950/20" skillKey="writing" onAddSkillTime={onAddSkillTime} />
-                                <ActivityMetricItem icon="music" title="Shadowing" value={`${Math.round(dailyProgress.shadowing)} دقيقة`} color="text-purple-500 bg-purple-50 dark:bg-purple-950/20" skillKey="shadowing" onAddSkillTime={onAddSkillTime} />
-                                <ActivityMetricItem icon="bookmark" title="المفردات" value={`${dailyProgress.vocabulary} بطاقات`} color="text-primary-500 bg-primary-50 dark:bg-primary-950/20" />
                             </div>
                         </div>
                     </div>
@@ -3812,16 +3878,20 @@
                         setUser(u);
                         setAuthState('syncing');
                         try {
-                            // البنية الجديدة: كل مفتاح بيانات محفوظ كمستند مستقل تحت users/{uid}/data/{key}
+                            // تحميل بطاقات SRS بالبنية الدقيقة الجديدة (رزمة + كل بطاقة مستقلة) أولاً
+                            const decksLoadedGranular = await loadDecksFromCloud(u.uid);
+
+                            // باقي المفاتيح: كل مفتاح بيانات محفوظ كمستند مستقل تحت users/{uid}/data/{key}
                             const dataSnap = await firebase.firestore().collection('users').doc(u.uid).collection('data').get();
                             if (!dataSnap.empty) {
                                 dataSnap.forEach(docSnap => {
+                                    if (docSnap.id === 'srs_decks' && decksLoadedGranular) return; // تفادي الكتابة فوق البيانات الدقيقة الأحدث
                                     const d = docSnap.data();
                                     if (d && typeof d.value === 'string') {
                                         try { localStorage.setItem(docSnap.id, d.value); } catch (e) { /* تجاهل */ }
                                     }
                                 });
-                            } else {
+                            } else if (!decksLoadedGranular) {
                                 // توافق مع البنية القديمة (مستند واحد ضخم) إن وُجدت، كخطوة انتقالية تلقائية لمرة واحدة
                                 const oldDocSnap = await firebase.firestore().collection('users').doc(u.uid).get();
                                 if (oldDocSnap.exists) {
