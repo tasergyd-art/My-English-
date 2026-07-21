@@ -113,8 +113,6 @@
         // الحل: كل بطاقة تُخزَّن كمستند Firestore مستقل بذاته. فشل مزامنة بطاقة واحدة (صورة كبيرة
         // مثلاً) لا يؤثر إطلاقاً على أي بطاقة أخرى، قديمة كانت أو جديدة.
         let decksSyncTimer = null;
-        let previousDeckIds = new Set();
-        let previousCardIds = new Set();
 
         function scheduleDecksSync(decks) {
             if (!cloudUid) return;
@@ -137,19 +135,41 @@
             return clean;
         }
 
+        // حذف صريح ومباشر لرزمة وكل بطاقاتها من السحابة - يُستدعى فقط عند ضغط المستخدم زر الحذف فعلياً،
+        // وليس عبر مقارنة "قديم مقابل جديد" (تلك الطريقة كانت خطيرة: أي جهاز بحالة محلية قديمة/غير
+        // مكتملة قد يظن خطأً أن رزماً أو بطاقات "حُذفت" ويرسل أوامر حذف فعلية للسحابة تمسح بيانات
+        // أجهزة أخرى سليمة تماماً - وهذا سبب اختفاء الرزم بين الأجهزة).
+        async function deleteDeckFromCloud(deckId, cardIds) {
+            if (!cloudUid) return;
+            try {
+                const userRef = firebase.firestore().collection('users').doc(cloudUid);
+                const deletes = [userRef.collection('deckMeta').doc(deckId).delete()];
+                (cardIds || []).forEach(cid => deletes.push(userRef.collection('cards').doc(cid).delete()));
+                await Promise.allSettled(deletes);
+            } catch (err) {
+                console.error('تعذر حذف الرزمة من السحابة:', err);
+            }
+        }
+
+        async function deleteCardFromCloud(cardId) {
+            if (!cloudUid) return;
+            try {
+                await firebase.firestore().collection('users').doc(cloudUid).collection('cards').doc(cardId).delete();
+            } catch (err) {
+                console.error('تعذر حذف البطاقة من السحابة:', err);
+            }
+        }
+
         async function syncDecksNow(decks) {
             if (!cloudUid) return;
             try {
                 const userRef = firebase.firestore().collection('users').doc(cloudUid);
-                const currentDeckIds = new Set(decks.map(d => d.id));
-                const currentCardIds = new Set();
                 const failedCards = [];
                 const writes = [];
 
                 decks.forEach((deck, idx) => {
                     const cards = deck.cards || [];
                     const cardIds = cards.map(c => c.id);
-                    cardIds.forEach(id => currentCardIds.add(id));
 
                     writes.push(
                         userRef.collection('deckMeta').doc(deck.id).set(sanitizeForFirestore({ title: deck.title, order: idx, cardIds }))
@@ -166,13 +186,6 @@
                         );
                     });
                 });
-
-                // حذف أي رزمة أو بطاقة أُزيلت محلياً من نسخة السحابة أيضاً
-                previousDeckIds.forEach(id => { if (!currentDeckIds.has(id)) writes.push(userRef.collection('deckMeta').doc(id).delete().catch(() => {})); });
-                previousCardIds.forEach(id => { if (!currentCardIds.has(id)) writes.push(userRef.collection('cards').doc(id).delete().catch(() => {})); });
-
-                previousDeckIds = currentDeckIds;
-                previousCardIds = currentCardIds;
 
                 await Promise.allSettled(writes);
                 if (failedCards.length > 0) {
@@ -195,8 +208,8 @@
             try {
                 const userRef = firebase.firestore().collection('users').doc(uid);
                 const [deckMetaSnap, cardsSnap] = await Promise.all([
-                    userRef.collection('deckMeta').get(),
-                    userRef.collection('cards').get()
+                    userRef.collection('deckMeta').get({ source: 'server' }),
+                    userRef.collection('cards').get({ source: 'server' })
                 ]);
                 if (deckMetaSnap.empty) return false;
 
@@ -218,8 +231,6 @@
                 const finalDecks = ordered.map(o => o.deck);
 
                 localStorage.setItem('srs_decks', JSON.stringify(finalDecks));
-                previousDeckIds = new Set(finalDecks.map(d => d.id));
-                previousCardIds = new Set(finalDecks.flatMap(d => d.cards.map(c => c.id)));
                 return true;
             } catch (err) {
                 console.error('تعذر تحميل البطاقات من السحابة:', err);
@@ -1292,12 +1303,15 @@
             // Delete Deck
             const handleDeleteDeck = (deckId) => {
                 if (!confirm('هل أنت متأكد من حذف هذه الرزمة وجميع بطاقاتها؟')) return;
+                const deckToDelete = decks.find(d => d.id === deckId);
                 setDecks(decks.filter(d => d.id !== deckId));
+                deleteDeckFromCloud(deckId, deckToDelete ? deckToDelete.cards.map(c => c.id) : []);
             };
 
             // Delete Card
             const handleDeleteCard = (deckId, cardId) => {
                 setDecks(prev => prev.map(d => d.id === deckId ? { ...d, cards: d.cards.filter(c => c.id !== cardId) } : d));
+                deleteCardFromCloud(cardId);
             };
 
             // نسخ كلمة من بطاقة SRS إلى قسم "ممارسة المفردات" مع تحديد تصنيفها (اسم/فعل)
