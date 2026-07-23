@@ -160,6 +160,123 @@
             }
         }
 
+        // ============ مزامنة دقيقة لقسم الصوتيات (Phonics) ============
+        // نفس مبدأ بطاقات SRS تماماً: بيانات النص لكل حرف (خفيفة) بمستند مستقل، وكل مقطع صوتي
+        // (صوت الحرف + صوت كل كلمة + صوت الجملة) بمستند مستقل بذاته أيضاً - حتى لو حرف واحد فيه
+        // 5 مقاطع صوتية (200 كيلوبايت تقريباً لكل مقطع)، فشل مزامنة مقطع واحد لن يؤثر على البقية.
+        let phonicsSyncTimer = null;
+        function schedulePhonicsSync(letters) {
+            if (!cloudUid) return;
+            if (phonicsSyncTimer) clearTimeout(phonicsSyncTimer);
+            phonicsSyncTimer = setTimeout(() => syncPhonicsNow(letters), 1500);
+        }
+
+        async function syncPhonicsNow(letters) {
+            if (!cloudUid) return;
+            try {
+                const userRef = firebase.firestore().collection('users').doc(cloudUid);
+                const failedItems = [];
+                const writes = [];
+
+                letters.forEach((L, idx) => {
+                    writes.push(
+                        userRef.collection('phonicsMeta').doc(L.id).set(sanitizeForFirestore({
+                            letter: L.letter, order: idx,
+                            wordTexts: (L.words || []).map(w => w.text),
+                            sentenceText: L.sentence ? L.sentence.text : ''
+                        })).catch(err => console.error('فشل مزامنة بيانات حرف:', L.id, err))
+                    );
+
+                    if (L.letterAudio) {
+                        writes.push(
+                            userRef.collection('phonicsAudio').doc(L.id + '_letter').set(sanitizeForFirestore({ letterId: L.id, slot: 'letter', dataUrl: L.letterAudio }))
+                                .catch(err => { console.error('فشل مزامنة صوت حرف:', L.id, err); failedItems.push('صوت الحرف ' + L.letter); })
+                        );
+                    }
+                    (L.words || []).forEach((w, wIdx) => {
+                        if (w.audio) {
+                            writes.push(
+                                userRef.collection('phonicsAudio').doc(L.id + '_word' + wIdx).set(sanitizeForFirestore({ letterId: L.id, slot: 'word' + wIdx, dataUrl: w.audio }))
+                                    .catch(err => { console.error('فشل مزامنة صوت كلمة:', L.id, wIdx, err); failedItems.push('كلمة "' + w.text + '"'); })
+                            );
+                        }
+                    });
+                    if (L.sentence && L.sentence.audio) {
+                        writes.push(
+                            userRef.collection('phonicsAudio').doc(L.id + '_sentence').set(sanitizeForFirestore({ letterId: L.id, slot: 'sentence', dataUrl: L.sentence.audio }))
+                                .catch(err => { console.error('فشل مزامنة صوت جملة:', L.id, err); failedItems.push('جملة الحرف ' + L.letter); })
+                        );
+                    }
+                });
+
+                await Promise.allSettled(writes);
+                if (failedItems.length > 0) {
+                    if (window.notifyCloudSyncFailure) window.notifyCloudSyncFailure(failedItems[0] + ' (على الأغلب ملف صوتي كبير الحجم)');
+                }
+            } catch (err) {
+                console.error('خطأ غير متوقع أثناء مزامنة الصوتيات:', err);
+                if (window.notifyCloudSyncFailure) window.notifyCloudSyncFailure('خطأ غير متوقع في مزامنة الصوتيات: ' + (err && err.message ? err.message : String(err)));
+            }
+        }
+
+        async function loadPhonicsFromCloud(uid) {
+            try {
+                const userRef = firebase.firestore().collection('users').doc(uid);
+                const [metaSnap, audioSnap] = await Promise.all([
+                    userRef.collection('phonicsMeta').get({ source: 'server' }),
+                    userRef.collection('phonicsAudio').get({ source: 'server' })
+                ]);
+                if (metaSnap.empty) return false;
+
+                const audioByLetter = {};
+                audioSnap.forEach(docSnap => {
+                    const a = docSnap.data();
+                    if (!audioByLetter[a.letterId]) audioByLetter[a.letterId] = {};
+                    audioByLetter[a.letterId][a.slot] = a.dataUrl;
+                });
+
+                const ordered = [];
+                metaSnap.forEach(docSnap => {
+                    const meta = docSnap.data();
+                    const audios = audioByLetter[docSnap.id] || {};
+                    const wordTexts = meta.wordTexts || ['', '', ''];
+                    ordered.push({
+                        order: typeof meta.order === 'number' ? meta.order : 999,
+                        letterObj: {
+                            id: docSnap.id,
+                            letter: meta.letter,
+                            letterAudio: audios['letter'] || null,
+                            words: wordTexts.map((t, i) => ({ id: docSnap.id + '_w' + i, text: t, audio: audios['word' + i] || null })),
+                            sentence: { text: meta.sentenceText || '', audio: audios['sentence'] || null }
+                        }
+                    });
+                });
+                ordered.sort((a, b) => a.order - b.order);
+                localStorage.setItem('phonics_letters', JSON.stringify(ordered.map(o => o.letterObj)));
+                return true;
+            } catch (err) {
+                console.error('تعذر تحميل الصوتيات من السحابة:', err);
+                return false;
+            }
+        }
+
+        async function deleteLetterFromCloud(letterId) {
+            if (!cloudUid) return;
+            try {
+                const userRef = firebase.firestore().collection('users').doc(cloudUid);
+                await Promise.allSettled([
+                    userRef.collection('phonicsMeta').doc(letterId).delete(),
+                    userRef.collection('phonicsAudio').doc(letterId + '_letter').delete(),
+                    userRef.collection('phonicsAudio').doc(letterId + '_word0').delete(),
+                    userRef.collection('phonicsAudio').doc(letterId + '_word1').delete(),
+                    userRef.collection('phonicsAudio').doc(letterId + '_word2').delete(),
+                    userRef.collection('phonicsAudio').doc(letterId + '_sentence').delete()
+                ]);
+            } catch (err) {
+                console.error('تعذر حذف الحرف من السحابة:', err);
+            }
+        }
+
         async function syncDecksNow(decks) {
             if (!cloudUid) return;
             try {
@@ -646,6 +763,12 @@
                 return saved ? JSON.parse(saved) : [];
             });
 
+            // قسم الصوتيات (Phonics)
+            const [phonicsLetters, setPhonicsLetters] = useState(() => {
+                const saved = localStorage.getItem('phonics_letters');
+                return saved ? JSON.parse(saved) : [];
+            });
+
             // Save Databases to LocalStorage on Change
             useEffect(() => {
                 try { localStorage.setItem('srs_decks', JSON.stringify(decks)); } catch (err) { console.error('تعذر حفظ البطاقات محلياً:', err); }
@@ -667,6 +790,10 @@
             useEffect(() => { safeSetLocalStorage('shadowing_sources', JSON.stringify(shadowingSources)); }, [shadowingSources]);
             useEffect(() => { safeSetLocalStorage('shadowing_units_new', JSON.stringify(shadowingUnitsNew)); }, [shadowingUnitsNew]);
             useEffect(() => { safeSetLocalStorage('other_elements', JSON.stringify(otherElements)); }, [otherElements]);
+            useEffect(() => {
+                try { localStorage.setItem('phonics_letters', JSON.stringify(phonicsLetters)); } catch (err) { console.error('تعذر حفظ الصوتيات محلياً:', err); }
+                schedulePhonicsSync(phonicsLetters); // مزامنة دقيقة لكل مقطع صوتي على حدة، بنفس أسلوب بطاقات SRS الآمن
+            }, [phonicsLetters]);
             useEffect(() => { safeSetLocalStorage('streak_count', String(streaks)); }, [streaks]);
             useEffect(() => { safeSetLocalStorage('streak_last_active', lastActiveDate); }, [lastActiveDate]);
             useEffect(() => { safeSetLocalStorage('daily_reminders', JSON.stringify({ date: todayKey(), items: dailyReminders })); }, [dailyReminders]);
@@ -880,6 +1007,13 @@
                                 unitsNew={shadowingUnitsNew}
                                 setUnitsNew={setShadowingUnitsNew}
                                 onAddStats={makeStatAdder('shadowing')}
+                                onBack={() => setCurrentTab('practice')}
+                            />
+                        )}
+                        {currentTab === 'phonics' && (
+                            <PhonicsScreen
+                                letters={phonicsLetters}
+                                setLetters={setPhonicsLetters}
                                 onBack={() => setCurrentTab('practice')}
                             />
                         )}
@@ -1717,6 +1851,7 @@
                         <HubCard icon="headphones" title="قسم الاستماع (Listening)" desc="مكتبة صوتيات ووحدات تدريب مخصصة." color="border-blue-500 text-blue-500 bg-blue-50/50" onClick={() => onNavigate('listening')} />
                         <HubCard icon="mic" title="قسم التحدث (Speaking)" desc="تطوير طلاقة النطق وتجاوز حواجز التردد." color="border-orange-500 text-orange-500 bg-orange-50/50" onClick={() => onNavigate('speaking')} />
                         <HubCard icon="music" title="تقنية الـ Shadowing" desc="تتبع المتحدث الأصلي لضبط مخارج الحروف." color="border-purple-500 text-purple-500 bg-purple-50/50" onClick={() => onNavigate('shadowing')} />
+                        <HubCard icon="volume-2" title="الصوتيات (Phonics)" desc="صوت كل حرف مع كلماته وجُمله للنطق السليم." color="border-green-500 text-green-500 bg-green-50/50" onClick={() => onNavigate('phonics')} />
                         <HubCard icon="folder-open" title="أقسام أخرى مخصصة" desc="أضف ملاحظاتك، مذكراتك ومقاطع صوتية حرة." color="border-teal-500 text-teal-500 bg-teal-50/50" onClick={() => onNavigate('other')} />
                     </div>
                 </div>
@@ -3895,6 +4030,223 @@
         }
 
         // ==========================================
+        // قسم الصوتيات (Phonics): صوت الحرف + 3 كلمات + جملة، لكل حرف
+        // ==========================================
+
+        // مكوّن موحّد لصندوق نص + صوت واحد (رفع/تسجيل/تشغيل/حذف)
+        function AudioSlot({ label, text, onTextChange, textPlaceholder, audio, onAudioChange }) {
+            const fileInputRef = useRef(null);
+            const mediaRecorderRef = useRef(null);
+            const chunksRef = useRef([]);
+            const [isRecording, setIsRecording] = useState(false);
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [audio, isRecording]);
+
+            const handleFilePick = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = () => onAudioChange(reader.result);
+                reader.readAsDataURL(file);
+            };
+
+            const startRecording = async () => {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    const recorder = new MediaRecorder(stream);
+                    chunksRef.current = [];
+                    recorder.ondataavailable = (e) => chunksRef.current.push(e.data);
+                    recorder.onstop = () => {
+                        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+                        const reader = new FileReader();
+                        reader.onload = () => onAudioChange(reader.result);
+                        reader.readAsDataURL(blob);
+                        stream.getTracks().forEach(t => t.stop());
+                    };
+                    mediaRecorderRef.current = recorder;
+                    recorder.start();
+                    setIsRecording(true);
+                } catch (err) {
+                    alert('تعذّر الوصول إلى الميكروفون. تأكد من السماح للتطبيق باستخدامه.');
+                }
+            };
+            const stopRecording = () => {
+                if (mediaRecorderRef.current) mediaRecorderRef.current.stop();
+                setIsRecording(false);
+            };
+
+            return (
+                <div class="p-3 bg-green-50/60 dark:bg-green-950/10 border border-green-100 dark:border-green-900/40 rounded-2xl space-y-2">
+                    <label class="text-[11px] font-bold text-green-700 dark:text-green-400">{label}</label>
+                    <input type="text" placeholder={textPlaceholder} value={text} onChange={(e) => onTextChange(e.target.value)} class="w-full border border-green-200 dark:border-green-900 dark:bg-slate-800 p-2.5 rounded-xl text-sm" />
+                    <input type="file" accept="audio/*" ref={fileInputRef} onChange={handleFilePick} class="hidden" />
+                    <div class="flex items-center flex-wrap gap-2">
+                        <button type="button" onClick={() => fileInputRef.current.click()} class="flex items-center gap-1 bg-white dark:bg-slate-800 border border-green-200 dark:border-green-900 text-green-700 dark:text-green-400 px-2.5 py-1.5 rounded-lg text-[11px] font-bold">
+                            <i data-lucide="upload" class="w-3.5 h-3.5"></i> رفع صوت
+                        </button>
+                        {!isRecording ? (
+                            <button type="button" onClick={startRecording} class="flex items-center gap-1 bg-white dark:bg-slate-800 border border-green-200 dark:border-green-900 text-green-700 dark:text-green-400 px-2.5 py-1.5 rounded-lg text-[11px] font-bold">
+                                <i data-lucide="mic" class="w-3.5 h-3.5"></i> تسجيل
+                            </button>
+                        ) : (
+                            <button type="button" onClick={stopRecording} class="flex items-center gap-1 bg-red-500 text-white px-2.5 py-1.5 rounded-lg text-[11px] font-bold animate-pulse">
+                                <i data-lucide="square" class="w-3.5 h-3.5"></i> إيقاف
+                            </button>
+                        )}
+                        {audio && (
+                            <>
+                                <audio controls src={audio} class="h-8 max-w-[160px]"></audio>
+                                <button type="button" onClick={() => onAudioChange(null)} title="حذف الصوت" class="text-slate-300 hover:text-red-500">
+                                    <i data-lucide="trash-2" class="w-4 h-4"></i>
+                                </button>
+                            </>
+                        )}
+                    </div>
+                </div>
+            );
+        }
+
+        function PhonicsScreen({ letters, setLetters, onBack }) {
+            const [mode, setMode] = useState('list'); // list | form
+            const [editingId, setEditingId] = useState(null);
+
+            const [fLetter, setFLetter] = useState('');
+            const [fLetterAudio, setFLetterAudio] = useState(null);
+            const [fWords, setFWords] = useState([{ id: 'w0', text: '', audio: null }, { id: 'w1', text: '', audio: null }, { id: 'w2', text: '', audio: null }]);
+            const [fSentenceText, setFSentenceText] = useState('');
+            const [fSentenceAudio, setFSentenceAudio] = useState(null);
+
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [mode, letters.length]);
+
+            const resetForm = () => {
+                setFLetter(''); setFLetterAudio(null);
+                setFWords([{ id: 'w0', text: '', audio: null }, { id: 'w1', text: '', audio: null }, { id: 'w2', text: '', audio: null }]);
+                setFSentenceText(''); setFSentenceAudio(null);
+                setEditingId(null);
+            };
+
+            const openAddForm = () => { resetForm(); setMode('form'); };
+
+            const openEditForm = (L) => {
+                setEditingId(L.id);
+                setFLetter(L.letter || '');
+                setFLetterAudio(L.letterAudio || null);
+                setFWords((L.words && L.words.length === 3) ? L.words : [{ id: 'w0', text: '', audio: null }, { id: 'w1', text: '', audio: null }, { id: 'w2', text: '', audio: null }]);
+                setFSentenceText(L.sentence ? L.sentence.text : '');
+                setFSentenceAudio(L.sentence ? L.sentence.audio : null);
+                setMode('form');
+            };
+
+            const updateWord = (idx, field, value) => {
+                setFWords(prev => prev.map((w, i) => i === idx ? { ...w, [field]: value } : w));
+            };
+
+            const handleSave = () => {
+                if (!fLetter.trim()) { alert('أدخل الحرف أولاً (مثلاً: A).'); return; }
+                const letterObj = {
+                    id: editingId || Date.now().toString(),
+                    letter: fLetter.trim(),
+                    letterAudio: fLetterAudio,
+                    words: fWords,
+                    sentence: { text: fSentenceText, audio: fSentenceAudio }
+                };
+                playHardClick();
+                if (editingId) {
+                    setLetters(prev => prev.map(L => L.id === editingId ? letterObj : L));
+                } else {
+                    setLetters(prev => [...prev, letterObj]);
+                }
+                resetForm();
+                setMode('list');
+            };
+
+            const handleDeleteLetter = (letterId) => {
+                if (!confirm('حذف هذا الحرف بكل صوتياته (الحرف والكلمات والجملة)؟')) return;
+                playHardClick();
+                setLetters(prev => prev.filter(L => L.id !== letterId));
+                deleteLetterFromCloud(letterId);
+                if (editingId === letterId) { resetForm(); setMode('list'); }
+            };
+
+            if (mode === 'form') {
+                return (
+                    <div class="space-y-5 max-w-xl mx-auto">
+                        <div class="flex items-center justify-between">
+                            <BackButton onClick={() => { resetForm(); setMode('list'); }} label="رجوع" />
+                            <h2 class="text-lg font-black text-green-700 dark:text-green-400">{editingId ? 'تعديل الحرف' : 'إضافة صوت جديد'}</h2>
+                            <span class="w-10"></span>
+                        </div>
+
+                        <AudioSlot
+                            label="الحرف"
+                            text={fLetter}
+                            onTextChange={setFLetter}
+                            textPlaceholder="مثال: A"
+                            audio={fLetterAudio}
+                            onAudioChange={setFLetterAudio}
+                        />
+
+                        <div class="space-y-3">
+                            <h3 class="text-sm font-bold text-green-700 dark:text-green-400">الكلمات (3)</h3>
+                            {fWords.map((w, idx) => (
+                                <AudioSlot
+                                    key={w.id}
+                                    label={`كلمة ${idx + 1}`}
+                                    text={w.text}
+                                    onTextChange={(v) => updateWord(idx, 'text', v)}
+                                    textPlaceholder="مثال: Apple"
+                                    audio={w.audio}
+                                    onAudioChange={(v) => updateWord(idx, 'audio', v)}
+                                />
+                            ))}
+                        </div>
+
+                        <div class="space-y-3">
+                            <h3 class="text-sm font-bold text-green-700 dark:text-green-400">الجملة</h3>
+                            <AudioSlot
+                                label="الجملة"
+                                text={fSentenceText}
+                                onTextChange={setFSentenceText}
+                                textPlaceholder="مثال: An apple a day keeps the doctor away."
+                                audio={fSentenceAudio}
+                                onAudioChange={setFSentenceAudio}
+                            />
+                        </div>
+
+                        <div class="flex justify-end gap-2 pb-6">
+                            <button onClick={() => { resetForm(); setMode('list'); }} class="px-4 py-2 text-slate-500">إلغاء</button>
+                            <button onClick={handleSave} class="bg-green-600 hover:bg-green-700 text-white px-6 py-2.5 rounded-xl font-bold">تم</button>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div class="space-y-6">
+                    <div class="flex items-center justify-between">
+                        <BackButton onClick={onBack} />
+                        <h2 class="text-xl font-black text-green-700 dark:text-green-400">الصوتيات (Phonics)</h2>
+                        <button onClick={openAddForm} class="bg-green-600 hover:bg-green-700 text-white text-xs px-3 py-1.5 rounded-xl font-bold">+ إضافة صوت</button>
+                    </div>
+
+                    <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
+                        {letters.map(L => (
+                            <div key={L.id} class="relative bg-green-50 dark:bg-green-950/20 border-2 border-green-200 dark:border-green-900 rounded-2xl aspect-square flex flex-col items-center justify-center cursor-pointer hover:scale-[1.03] active:scale-95 transition-all" onClick={() => openEditForm(L)}>
+                                <span class="text-3xl font-black text-green-700 dark:text-green-400 font-inter">{L.letter}</span>
+                                {L.letterAudio && <i data-lucide="volume-2" class="w-3.5 h-3.5 text-green-500 mt-1"></i>}
+                                <button onClick={(e) => { e.stopPropagation(); handleDeleteLetter(L.id); }} class="absolute top-1.5 left-1.5 text-green-300 hover:text-red-500">
+                                    <i data-lucide="x" class="w-3.5 h-3.5"></i>
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                    {letters.length === 0 && (
+                        <p class="text-xs text-slate-400 text-center py-10">لا توجد حروف مضافة بعد. اضغط "+ إضافة صوت" لإضافة أول حرف.</p>
+                    )}
+                </div>
+            );
+        }
+
+        // ==========================================
         // بوابة الدخول: تسجيل الدخول / إنشاء حساب + تحميل البيانات السحابية قبل عرض التطبيق
         // ==========================================
         function AuthGate() {
@@ -3917,12 +4269,15 @@
                         try {
                             // تحميل بطاقات SRS بالبنية الدقيقة الجديدة (رزمة + كل بطاقة مستقلة) أولاً
                             const decksLoadedGranular = await loadDecksFromCloud(u.uid);
+                            // تحميل الصوتيات بنفس البنية الدقيقة (بيانات الحرف + كل مقطع صوتي مستقل)
+                            const phonicsLoadedGranular = await loadPhonicsFromCloud(u.uid);
 
                             // باقي المفاتيح: كل مفتاح بيانات محفوظ كمستند مستقل تحت users/{uid}/data/{key}
                             const dataSnap = await firebase.firestore().collection('users').doc(u.uid).collection('data').get();
                             if (!dataSnap.empty) {
                                 dataSnap.forEach(docSnap => {
                                     if (docSnap.id === 'srs_decks' && decksLoadedGranular) return; // تفادي الكتابة فوق البيانات الدقيقة الأحدث
+                                    if (docSnap.id === 'phonics_letters' && phonicsLoadedGranular) return;
                                     const d = docSnap.data();
                                     if (d && typeof d.value === 'string') {
                                         try { localStorage.setItem(docSnap.id, d.value); } catch (e) { /* تجاهل */ }
