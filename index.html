@@ -36,6 +36,38 @@
         .thin-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
         /* لوحة الرسم/التعليق بالقلم أو الإصبع */
         .draw-canvas { touch-action: none; cursor: crosshair; }
+
+        /* ============ إصلاح عام لوضوح حقول الإدخال بالوضع الليلي ============ */
+        /* بعض المتصفحات (خصوصاً Safari/iPad) تفرض تنسيقاً داكناً تلقائياً على عناصر
+           input/textarea/select عند تفعيل الوضع الليلي بالنظام، بغض النظر عن ألوان Tailwind،
+           فيصير النص أبيض على خلفية بيضاء (غير مرئي). هذا يجبر المتصفح على العرض الفاتح دائماً
+           لعناصر النموذج، ويُبقي تلوين التطبيق نفسه (dark:) كما هو دون تأثير. */
+        input, textarea, select {
+            color-scheme: light;
+        }
+        /* أي حقل إدخال لم يُخصَّص له لون صريح بالوضع الليلي يرث خلفية داكنة ونص فاتح واضح تلقائياً */
+        .dark input:not([class*="dark:bg-"]),
+        .dark textarea:not([class*="dark:bg-"]),
+        .dark select:not([class*="dark:bg-"]) {
+            background-color: #1e293b;
+            color: #f1f5f9;
+            border-color: #334155;
+        }
+        .dark input::placeholder,
+        .dark textarea::placeholder {
+            color: #94a3b8;
+        }
+
+        /* ============ إصلاح شامل لمشكلة "النص الأبيض على خلفية بيضاء" بالوضع الليلي ============ */
+        /* عشرات النوافذ المنبثقة والبطاقات بالتطبيق تستخدم خلفية "bg-white" ثابتة (بدون نسخة
+           dark: مقابلة)، بينما نص العنصر الأب (body) يتحول تلقائياً لأبيض تقريباً بالوضع الليلي
+           (dark:text-slate-100). النتيجة: نص أبيض فوق خلفية بيضاء = غير مرئي تماماً.
+           هذا الإصلاح يجعل أي عنصر "bg-white" لم يُخصَّص له لون داكن مقابل صراحة يتحول تلقائياً
+           لخلفية داكنة ونص فاتح واضح بالوضع الليلي، دون التأثير على العناصر المصممة أصلاً للوضعين. */
+        .dark .bg-white:not([class*="dark:bg-"]) {
+            background-color: #1e293b;
+            color: #f1f5f9;
+        }
     </style>
     <script>
         tailwind.config = {
@@ -976,6 +1008,7 @@
                                 setSuggestions={setWritingSuggestions}
                                 onAddStats={makeStatAdder('writing')}
                                 onBack={() => setCurrentTab('practice')}
+                                wordUnits={wordUnits}
                             />
                         )}
                         {currentTab === 'listening' && (
@@ -2380,13 +2413,19 @@
         // ==========================================
         // مكوّن لوحة رسم/تعليق (بالقلم أو الإصبع) فوق الملف المعروض، مع إمكانية المسح والحفظ
         // ==========================================
-        function AnnotationCanvas({ initialData, onSave, height = 900 }) {
+        const PEN_COLORS = ['#1d4ed8', '#0f172a', '#dc2626', '#16a34a', '#7c3aed'];
+
+        function AnnotationCanvas({ initialData, onSave, height = 900, maxViewHeight = 420, toolbarPosition = 'top' }) {
             const canvasRef = useRef(null);
             const wrapperRef = useRef(null);
             const drawingRef = useRef(false);
             const lastTouchYRef = useRef(null);
+            const autoSaveTimerRef = useRef(null);
+            const hasStrokeRef = useRef(false);
             const [mode, setMode] = useState('pen'); // pen | eraser
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [mode]);
+            const [penColor, setPenColor] = useState(PEN_COLORS[0]);
+            const [showColors, setShowColors] = useState(false);
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [mode, showColors]);
 
             useEffect(() => {
                 const canvas = canvasRef.current;
@@ -2396,6 +2435,11 @@
                     img.onload = () => ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
                     img.src = initialData;
                 }
+                // حفظ تلقائي عند الخروج من هذه اللوحة (تغيير الصفحة/إغلاقها) حتى بدون ضغط أي زر
+                return () => {
+                    if (hasStrokeRef.current) onSave(canvasRef.current.toDataURL('image/png'));
+                };
+                // eslint-disable-next-line
             }, []);
 
             const getPos = (e) => {
@@ -2403,6 +2447,14 @@
                 const clientX = e.touches ? e.touches[0].clientX : e.clientX;
                 const clientY = e.touches ? e.touches[0].clientY : e.clientY;
                 return { x: (clientX - rect.left) * (canvasRef.current.width / rect.width), y: (clientY - rect.top) * (canvasRef.current.height / rect.height) };
+            };
+
+            const scheduleAutoSave = () => {
+                hasStrokeRef.current = true;
+                if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+                autoSaveTimerRef.current = setTimeout(() => {
+                    onSave(canvasRef.current.toDataURL('image/png'));
+                }, 900);
             };
 
             const startDraw = (e) => {
@@ -2433,50 +2485,86 @@
                 e.preventDefault();
                 const ctx = canvasRef.current.getContext('2d');
                 const { x, y } = getPos(e);
-                ctx.lineWidth = mode === 'eraser' ? 20 : 3;
+                ctx.lineWidth = mode === 'eraser' ? 20 : 2.2; // 2.2 = سماكة قلم حبر جاف (Ballpoint) رفيعة وطبيعية
                 ctx.lineCap = 'round';
-                ctx.strokeStyle = mode === 'eraser' ? '#ffffff' : '#1d4ed8';
+                ctx.lineJoin = 'round';
+                ctx.strokeStyle = mode === 'eraser' ? '#ffffff' : penColor;
                 ctx.globalCompositeOperation = mode === 'eraser' ? 'destination-out' : 'source-over';
                 ctx.lineTo(x, y);
                 ctx.stroke();
             };
 
-            const endDraw = () => { drawingRef.current = false; lastTouchYRef.current = null; };
+            const endDraw = () => {
+                if (drawingRef.current) scheduleAutoSave();
+                drawingRef.current = false;
+                lastTouchYRef.current = null;
+            };
 
             const clearCanvas = () => {
                 playHardClick();
                 const canvas = canvasRef.current;
                 const ctx = canvas.getContext('2d');
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
+                scheduleAutoSave();
             };
 
-            const handleSave = () => {
-                playHardClick();
-                onSave(canvasRef.current.toDataURL('image/png'));
-            };
+            const toolbar = (
+                <div class={`flex gap-2 ${toolbarPosition === 'side' ? 'flex-col items-center' : 'items-center flex-wrap'}`}>
+                    <button type="button" onClick={() => { setMode('pen'); setShowColors(false); }} class={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold ${mode === 'pen' ? 'bg-primary-500 text-white' : 'bg-slate-100 dark:bg-slate-700 dark:text-slate-200 text-slate-600'}`}>
+                        <i data-lucide="pen" class="w-3.5 h-3.5"></i> {toolbarPosition === 'top' && 'قلم حبر جاف'}
+                    </button>
+                    <div class="relative">
+                        <button type="button" onClick={() => setShowColors(v => !v)} title="لون القلم" class="w-7 h-7 rounded-full border-2 border-white shadow" style={{ backgroundColor: penColor }}></button>
+                        {showColors && (
+                            <div class={`absolute z-10 bg-white dark:bg-slate-800 border dark:border-slate-600 rounded-xl p-2 flex gap-1.5 shadow-lg ${toolbarPosition === 'side' ? 'top-0 right-9 flex-col' : 'top-9 right-0'}`}>
+                                {PEN_COLORS.map(c => (
+                                    <button key={c} type="button" onClick={() => { setPenColor(c); setMode('pen'); setShowColors(false); }} class="w-6 h-6 rounded-full border-2 border-white shadow" style={{ backgroundColor: c }}></button>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                    <button type="button" onClick={() => setMode('eraser')} class={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold ${mode === 'eraser' ? 'bg-primary-500 text-white' : 'bg-slate-100 dark:bg-slate-700 dark:text-slate-200 text-slate-600'}`}>
+                        <i data-lucide="eraser" class="w-3.5 h-3.5"></i> {toolbarPosition === 'top' && 'ممسحة'}
+                    </button>
+                    <button type="button" onClick={clearCanvas} class="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold bg-slate-100 dark:bg-slate-700 dark:text-slate-200 text-slate-600">
+                        <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i> {toolbarPosition === 'top' && 'تفريغ الكل'}
+                    </button>
+                    {toolbarPosition === 'top' && (
+                        <span class="mr-auto text-[10px] text-slate-400 flex items-center gap-1"><i data-lucide="check" class="w-3 h-3"></i> يُحفظ تلقائياً</span>
+                    )}
+                </div>
+            );
+
+            if (toolbarPosition === 'side') {
+                return (
+                    <div class="space-y-2">
+                        <div class="flex gap-3 items-start">
+                            <div ref={wrapperRef} class="notebook-paper flex-1 rounded-xl border border-slate-200 overflow-y-auto thin-scroll select-none" style={{ maxHeight: maxViewHeight + 'px', WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }}>
+                                <canvas
+                                    ref={canvasRef}
+                                    width={600}
+                                    height={height}
+                                    class="draw-canvas w-full block bg-transparent select-none"
+                                    onMouseDown={startDraw} onMouseMove={draw} onMouseUp={endDraw} onMouseLeave={endDraw}
+                                    onTouchStart={startDraw} onTouchMove={draw} onTouchEnd={endDraw}
+                                ></canvas>
+                            </div>
+                            <div class="shrink-0 bg-slate-50 dark:bg-slate-800 p-2 rounded-xl">{toolbar}</div>
+                        </div>
+                        <p class="text-[10px] text-slate-400 text-center flex items-center justify-center gap-1"><i data-lucide="check" class="w-3 h-3"></i> يُحفظ تلقائياً · مرّر للأسفل داخل الورقة لمساحة أكبر</p>
+                    </div>
+                );
+            }
 
             return (
                 <div class="space-y-2">
-                    <div class="flex items-center gap-2">
-                        <button type="button" onClick={() => setMode('pen')} class={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold ${mode === 'pen' ? 'bg-primary-500 text-white' : 'bg-slate-100 text-slate-600'}`}>
-                            <i data-lucide="pen" class="w-3.5 h-3.5"></i> قلم
-                        </button>
-                        <button type="button" onClick={() => setMode('eraser')} class={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold ${mode === 'eraser' ? 'bg-primary-500 text-white' : 'bg-slate-100 text-slate-600'}`}>
-                            <i data-lucide="eraser" class="w-3.5 h-3.5"></i> ممسحة (إصبع)
-                        </button>
-                        <button type="button" onClick={clearCanvas} class="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold bg-slate-100 text-slate-600">
-                            <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i> تفريغ الكل
-                        </button>
-                        <button type="button" onClick={handleSave} class="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-500 text-white mr-auto">
-                            <i data-lucide="save" class="w-3.5 h-3.5"></i> حفظ التعديلات
-                        </button>
-                    </div>
-                    <div ref={wrapperRef} class="notebook-paper w-full rounded-xl border border-slate-200 overflow-y-auto thin-scroll" style={{ maxHeight: '420px' }}>
+                    {toolbar}
+                    <div ref={wrapperRef} class="notebook-paper w-full rounded-xl border border-slate-200 overflow-y-auto thin-scroll select-none" style={{ maxHeight: maxViewHeight + 'px', WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }}>
                         <canvas
                             ref={canvasRef}
                             width={600}
                             height={height}
-                            class="draw-canvas w-full block bg-transparent"
+                            class="draw-canvas w-full block bg-transparent select-none"
                             onMouseDown={startDraw} onMouseMove={draw} onMouseUp={endDraw} onMouseLeave={endDraw}
                             onTouchStart={startDraw} onTouchMove={draw} onTouchEnd={endDraw}
                         ></canvas>
@@ -3039,22 +3127,49 @@
         // ==========================================
         // 10. WRITING SCREEN
         // ==========================================
-        function WritingScreen({ topics, setWritingTopics, suggestions, setSuggestions, onAddStats, onBack }) {
+        function WritingScreen({ topics, setWritingTopics, suggestions, setSuggestions, onAddStats, onBack, wordUnits }) {
             const [isAddingTopic, setIsAddingTopic] = useState(false);
             const [topicTitle, setTopicTitle] = useState('');
             const [newSuggestionText, setNewSuggestionText] = useState('');
             const [suggestionIndex, setSuggestionIndex] = useState(0);
 
             const [activeWriteTopic, setActiveWriteTopic] = useState(null);
-            const [writeMode, setWriteMode] = useState(null); // null | 'hand' | 'keyboard'
 
-            // Essay write text
-            const [essayText, setEssayText] = useState('');
-            const [essayDuration, setEssayDuration] = useState(10);
-            const [isAnalysing, setIsAnalysing] = useState(false);
-            const [analysisResult, setAnalysisResult] = useState(null);
+            // مؤقّت يدوي واحد فقط (بدل أزرار المدد الأربعة القديمة)
+            const [timerSeconds, setTimerSeconds] = useState(0);
+            const [timerRunning, setTimerRunning] = useState(false);
+            const timerIntervalRef = useRef(null);
 
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [isAddingTopic, activeWriteTopic, writeMode, isAnalysing, analysisResult, suggestions.length]);
+            // اختيار كلمة من قسم ممارسة المفردات لإضافتها لقسم "الكلمات الجديدة"
+            const [isPickingWord, setIsPickingWord] = useState(false);
+            const [pickWordUnitId, setPickWordUnitId] = useState(null);
+
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [isAddingTopic, activeWriteTopic, suggestions.length, isPickingWord, timerRunning]);
+
+            useEffect(() => {
+                if (timerRunning) {
+                    timerIntervalRef.current = setInterval(() => setTimerSeconds(s => s + 1), 1000);
+                } else if (timerIntervalRef.current) {
+                    clearInterval(timerIntervalRef.current);
+                }
+                return () => { if (timerIntervalRef.current) clearInterval(timerIntervalRef.current); };
+            }, [timerRunning]);
+
+            const formatTimer = (totalSeconds) => {
+                const m = Math.floor(totalSeconds / 60).toString().padStart(2, '0');
+                const s = (totalSeconds % 60).toString().padStart(2, '0');
+                return `${m}:${s}`;
+            };
+
+            const toggleTimer = () => {
+                playSoftClick();
+                if (timerRunning) {
+                    // عند الإيقاف، نضيف الدقائق المنقضية فعلياً إلى الإحصائيات
+                    const minutesSpent = Math.round(timerSeconds / 60);
+                    if (minutesSpent > 0) onAddStats(minutesSpent);
+                }
+                setTimerRunning(r => !r);
+            };
 
             const handleCreateTopic = (titleToUse = null) => {
                 const finalTitle = titleToUse || topicTitle;
@@ -3065,7 +3180,10 @@
                     title: finalTitle,
                     duration: 10,
                     completed: false,
-                    text: ''
+                    text: '',
+                    essayDrawing: null,
+                    newWordsDrawing: null,
+                    pickedWords: []
                 };
 
                 setWritingTopics([...topics, newTopic]);
@@ -3094,7 +3212,6 @@
                 setWritingTopics(prev => prev.filter(t => t.id !== topicId));
                 if (activeWriteTopic && activeWriteTopic.id === topicId) {
                     setActiveWriteTopic(null);
-                    setWriteMode(null);
                 }
             };
 
@@ -3102,47 +3219,46 @@
                 if (suggestions.length === 0) return;
                 playHardClick();
                 const chosenText = suggestions[suggestionIndex].text;
-                const newTopic = { id: Date.now().toString(), title: chosenText, duration: 10, completed: false, text: '' };
+                const newTopic = { id: Date.now().toString(), title: chosenText, duration: 10, completed: false, text: '', essayDrawing: null, newWordsDrawing: null, pickedWords: [] };
                 setWritingTopics(prev => [...prev, newTopic]);
                 setIsAddingTopic(false);
                 // فتح الموضوع الجديد فوراً حتى يرى المستخدم إضافته مباشرة
-                setActiveWriteTopic(newTopic);
-                setWriteMode(null);
-                setEssayText('');
-                setAnalysisResult(null);
-            };
-
-            const handleAnalyzeText = () => {
-                if (!essayText.trim()) return;
-                setIsAnalysing(true);
-
-                // Simulated AI NLP checker logic
-                setTimeout(() => {
-                    setAnalysisResult({
-                        score: { grammar: '8/10', spelling: '9/10', style: 'Good' },
-                        corrections: [
-                            { original: 'I wants to learn english', correct: 'I want to learn English', explanation: 'استخدام صيغة الفعل الصحيحة للمفرد والجمع والاهتمام بالحروف الكبيرة.' }
-                        ]
-                    });
-                    setIsAnalysing(false);
-                    onAddStats(essayDuration); // Add writing minutes to statistics database
-                }, 1500);
+                openTopic(newTopic);
             };
 
             const openTopic = (topic) => {
                 setActiveWriteTopic(topic);
-                setWriteMode(null);
-                setEssayText(topic.text || '');
-                setAnalysisResult(null);
+                setTimerSeconds(0);
+                setTimerRunning(false);
             };
 
             const closeEditor = () => {
-                if (writeMode === 'keyboard') {
-                    setWritingTopics(prev => prev.map(t => t.id === activeWriteTopic.id ? { ...t, text: essayText } : t));
-                }
                 setActiveWriteTopic(null);
-                setWriteMode(null);
-                setAnalysisResult(null);
+                setTimerRunning(false);
+            };
+
+            // حفظ صامت وفوري (بدون أي زر) لكل تعديل يحصل أثناء الكتابة بالقلم
+            const persistTopicField = (field, value) => {
+                if (!activeWriteTopic) return;
+                setWritingTopics(prev => prev.map(t => t.id === activeWriteTopic.id ? { ...t, [field]: value } : t));
+            };
+
+            const handleAddPickedWord = (word) => {
+                if (!activeWriteTopic) return;
+                const current = activeWriteTopic.pickedWords || [];
+                if (current.includes(word)) { setIsPickingWord(false); return; }
+                const updated = [...current, word];
+                setActiveWriteTopic(t => ({ ...t, pickedWords: updated }));
+                persistTopicField('pickedWords', updated);
+                playSoftClick();
+                setIsPickingWord(false);
+            };
+
+            const handleRemovePickedWord = (word) => {
+                if (!activeWriteTopic) return;
+                const updated = (activeWriteTopic.pickedWords || []).filter(w => w !== word);
+                setActiveWriteTopic(t => ({ ...t, pickedWords: updated }));
+                persistTopicField('pickedWords', updated);
             };
 
             return (
@@ -3153,7 +3269,7 @@
                     <div class="flex justify-between items-center">
                         <div>
                             <h2 class="text-2xl font-black">ممارسة الكتابة (Writing)</h2>
-                            <p class="text-sm text-slate-400 mt-1">اكتب وتلقَّ تصحيحات نحوية فورية مع التقييم الذكي</p>
+                            <p class="text-sm text-slate-400 mt-1">اكتب بخط يدك مباشرة على الورقة، وسيُحفظ كل شيء تلقائياً</p>
                         </div>
                         <button onClick={() => setIsAddingTopic(true)} class="bg-primary-500 text-white px-4 py-2 rounded-xl text-xs font-bold">
                             + إضافة موضوع
@@ -3163,12 +3279,12 @@
                     {/* Topics Grid Cards */}
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                         {topics.map(topic => (
-                            <div key={topic.id} class="bg-white border border-slate-100 p-5 rounded-2xl flex justify-between items-center gap-2">
+                            <div key={topic.id} class="bg-white dark:bg-slate-800 border border-slate-100 dark:border-slate-700 p-5 rounded-2xl flex justify-between items-center gap-2">
                                 <div class="flex-1 min-w-0">
-                                    <h4 class="font-bold text-slate-800 truncate">{topic.title}</h4>
-                                    <p class="text-xs text-slate-400 mt-1">المدة المفترضة: {topic.duration} دقيقة</p>
+                                    <h4 class="font-bold text-slate-800 dark:text-slate-100 truncate">{topic.title}</h4>
+                                    <p class="text-xs text-slate-400 mt-1">{topic.essayDrawing ? 'يوجد كتابة محفوظة' : 'لم يُكتب فيه بعد'}</p>
                                 </div>
-                                <button onClick={() => openTopic(topic)} class="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-4 py-2 rounded-xl font-bold shrink-0">
+                                <button onClick={() => openTopic(topic)} class="bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-200 text-slate-700 text-xs px-4 py-2 rounded-xl font-bold shrink-0">
                                     كتابة الآن
                                 </button>
                                 <button onClick={() => handleDeleteTopic(topic.id)} title="حذف الموضوع" class="text-slate-300 hover:text-red-500 shrink-0">
@@ -3181,13 +3297,13 @@
                     {/* Create topic modal popup - بنك اقتراحات المستخدم مع تصفح أمام/خلف (فقط، بدون حقل عنوان منفصل) */}
                     {isAddingTopic && (
                         <div class="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
-                            <div class="bg-white w-full max-w-md rounded-3xl p-6 space-y-4">
+                            <div class="bg-white dark:bg-slate-800 w-full max-w-md rounded-3xl p-6 space-y-4">
                                 <div class="flex justify-between items-center">
                                     <h3 class="text-lg font-bold">إضافة موضوع كتابة جديد</h3>
                                     <BackButton onClick={() => setIsAddingTopic(false)} label="إغلاق" />
                                 </div>
 
-                                <div class="space-y-2 p-3 bg-slate-50 rounded-xl">
+                                <div class="space-y-2 p-3 bg-slate-50 dark:bg-slate-900 rounded-xl">
                                     <span class="text-xs text-slate-400 block font-bold">أضف اقتراحاتك، ثم تصفحها وحدد الموضوع الذي تريد إضافته:</span>
                                     <div class="flex gap-2">
                                         <input type="text" placeholder="أضف اقتراح موضوع جديد..." value={newSuggestionText} onChange={(e) => setNewSuggestionText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleAddSuggestion(); }} class="flex-1 border p-2.5 rounded-lg text-xs" />
@@ -3197,13 +3313,13 @@
                                     {suggestions.length > 0 ? (
                                         <div class="space-y-2 pt-2">
                                             <div class="flex items-center gap-2">
-                                                <button onClick={() => { playSoftClick(); setSuggestionIndex(i => (i - 1 + suggestions.length) % suggestions.length); }} class="p-2 bg-white border rounded-full">
+                                                <button onClick={() => { playSoftClick(); setSuggestionIndex(i => (i - 1 + suggestions.length) % suggestions.length); }} class="p-2 bg-white dark:bg-slate-800 border dark:border-slate-600 rounded-full">
                                                     <i data-lucide="chevron-right" class="w-4 h-4"></i>
                                                 </button>
-                                                <div class="flex-1 text-center bg-white border rounded-xl py-3 px-2 font-bold text-sm">
+                                                <div class="flex-1 text-center bg-white dark:bg-slate-800 border dark:border-slate-600 rounded-xl py-3 px-2 font-bold text-sm">
                                                     {suggestions[suggestionIndex]?.text}
                                                 </div>
-                                                <button onClick={() => { playSoftClick(); setSuggestionIndex(i => (i + 1) % suggestions.length); }} class="p-2 bg-white border rounded-full">
+                                                <button onClick={() => { playSoftClick(); setSuggestionIndex(i => (i + 1) % suggestions.length); }} class="p-2 bg-white dark:bg-slate-800 border dark:border-slate-600 rounded-full">
                                                     <i data-lucide="chevron-left" class="w-4 h-4"></i>
                                                 </button>
                                                 <button onClick={handleDeleteSuggestion} title="حذف هذا الاقتراح" class="p-2 bg-red-50 text-red-500 border border-red-100 rounded-full">
@@ -3222,111 +3338,112 @@
                         </div>
                     )}
 
-                    {/* اختيار طريقة الكتابة: باليد أو بلوحة المفاتيح */}
-                    {activeWriteTopic && writeMode === null && (
-                        <div class="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
-                            <div class="bg-white w-full max-w-sm rounded-3xl p-6 space-y-4 text-center">
-                                <div class="flex justify-between items-center">
-                                    <BackButton onClick={() => setActiveWriteTopic(null)} label="إغلاق" />
-                                    <h3 class="text-lg font-bold">{activeWriteTopic.title}</h3>
-                                    <span class="w-10"></span>
+                    {/* شاشة الكتابة بخط اليد (بالقلم فقط) - عرض كامل الشاشة */}
+                    {activeWriteTopic && (
+                        <div class="fixed inset-0 bg-white dark:bg-slate-900 z-50 flex flex-col h-screen select-none" style={{ WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }}>
+                            <header class="p-4 border-b dark:border-slate-700 flex justify-between items-center bg-slate-50 dark:bg-slate-800 gap-2">
+                                <BackButton onClick={closeEditor} label="خروج" />
+                                <div class="text-center min-w-0">
+                                    <span class="text-[10px] text-slate-400 block font-bold">Subject / Title</span>
+                                    <h3 class="font-bold text-slate-800 dark:text-slate-100 truncate">{activeWriteTopic.title}</h3>
                                 </div>
-                                <p class="text-xs text-slate-400">اختر طريقة الكتابة المفضلة لديك:</p>
-                                <div class="grid grid-cols-2 gap-3">
-                                    <button onClick={() => setWriteMode('hand')} class="p-5 bg-slate-50 hover:bg-primary-50 border rounded-2xl flex flex-col items-center gap-2">
-                                        <i data-lucide="pen-tool" class="w-6 h-6 text-primary-500"></i>
-                                        <span class="text-xs font-bold">الكتابة باليد</span>
-                                    </button>
-                                    <button onClick={() => setWriteMode('keyboard')} class="p-5 bg-slate-50 hover:bg-primary-50 border rounded-2xl flex flex-col items-center gap-2">
-                                        <i data-lucide="keyboard" class="w-6 h-6 text-primary-500"></i>
-                                        <span class="text-xs font-bold">الكتابة بلوحة المفاتيح</span>
-                                    </button>
-                                </div>
-                                <button onClick={() => handleDeleteTopic(activeWriteTopic.id)} class="w-full flex items-center justify-center gap-1.5 text-red-500 text-xs font-bold py-2">
-                                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i> حذف هذا الموضوع
+                                <button onClick={() => handleDeleteTopic(activeWriteTopic.id)} class="text-slate-400 hover:text-red-500 flex items-center gap-1 text-xs font-bold shrink-0">
+                                    <i data-lucide="trash-2" class="w-4 h-4"></i>
                                 </button>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* وضع الكتابة باليد (رسم حر) */}
-                    {activeWriteTopic && writeMode === 'hand' && (
-                        <div class="fixed inset-0 bg-white z-50 flex flex-col h-screen">
-                            <header class="p-4 border-b flex justify-between items-center bg-slate-50">
-                                <BackButton onClick={() => setWriteMode(null)} />
-                                <h3 class="font-bold text-slate-800">{activeWriteTopic.title} - كتابة باليد</h3>
-                                <button onClick={closeEditor} class="bg-slate-200 px-4 py-1.5 rounded-full text-xs font-bold">إغلاق</button>
-                            </header>
-                            <div class="flex-1 overflow-y-auto p-6 max-w-3xl w-full mx-auto space-y-4">
-                                <div class="flex gap-4 items-center">
-                                    <span class="text-xs text-slate-400 font-bold shrink-0">مدة الجلسة بالدقائق:</span>
-                                    <div class="flex gap-1">
-                                        {[5, 10, 20, 30].map(mins => (
-                                            <button key={mins} onClick={() => setEssayDuration(mins)} class={`px-3 py-1 rounded-lg text-xs font-bold ${essayDuration === mins ? 'bg-primary-500 text-white' : 'bg-slate-100 text-slate-600'}`}>{mins} د</button>
-                                        ))}
-                                    </div>
-                                </div>
-                                <AnnotationCanvas key={activeWriteTopic.id} height={900} onSave={() => { onAddStats(essayDuration); alert('تم حفظ ما كتبته بخط يدك، وأُضيفت دقائق الجلسة إلى إحصائياتك.'); }} />
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Simulated Advanced Word processor writing desk with AI assessment tool */}
-                    {activeWriteTopic && writeMode === 'keyboard' && (
-                        <div class="fixed inset-0 bg-white z-50 flex flex-col h-screen">
-                            <header class="p-4 border-b flex justify-between items-center bg-slate-50">
-                                <BackButton onClick={() => setWriteMode(null)} />
-                                <div class="text-center">
-                                    <h3 class="font-bold text-slate-800">{activeWriteTopic.title}</h3>
-                                    <span class="text-xs text-slate-400">محرر الكتابة السلس مع المصحح النحوي الفوري</span>
-                                </div>
-                                <button onClick={closeEditor} class="bg-slate-200 px-4 py-1.5 rounded-full text-xs font-bold">حفظ وإغلاق</button>
                             </header>
 
-                            <div class="flex-1 overflow-y-auto p-6 max-w-3xl w-full mx-auto space-y-6">
-                                <div class="flex gap-4 items-center">
-                                    <span class="text-xs text-slate-400 font-bold shrink-0">مدة الجلسة بالدقائق:</span>
-                                    <div class="flex gap-1">
-                                        {[5, 10, 20, 30].map(mins => (
-                                            <button key={mins} onClick={() => setEssayDuration(mins)} class={`px-3 py-1 rounded-lg text-xs font-bold ${essayDuration === mins ? 'bg-primary-500 text-white' : 'bg-slate-100 text-slate-600'}`}>{mins} د</button>
-                                        ))}
+                            <div class="flex-1 overflow-y-auto p-4 md:p-6 max-w-3xl w-full mx-auto space-y-6">
+
+                                {/* قسم الكلمات الجديدة */}
+                                <div class="bg-green-50/50 dark:bg-green-950/10 border border-green-100 dark:border-green-900/40 rounded-2xl p-4 space-y-3">
+                                    <div class="flex items-center justify-between gap-2 flex-wrap">
+                                        <h4 class="text-xs font-bold text-slate-600 dark:text-slate-300">the new words that I want to use it :</h4>
+                                        <button onClick={() => { setIsPickingWord(true); setPickWordUnitId(wordUnits[0]?.id || null); }} class="flex items-center gap-1 bg-white dark:bg-slate-800 border border-green-200 dark:border-green-900 text-green-700 dark:text-green-400 px-2.5 py-1.5 rounded-lg text-[11px] font-bold">
+                                            <i data-lucide="list-plus" class="w-3.5 h-3.5"></i> اختر كلمة من ممارسة المفردات
+                                        </button>
                                     </div>
-                                </div>
 
-                                <textarea
-                                    value={essayText}
-                                    onChange={(e) => setEssayText(e.target.value)}
-                                    placeholder="ابدأ الكتابة هنا باللغة الإنجليزية..."
-                                    class="w-full h-80 border-0 focus:ring-0 p-4 rounded-2xl bg-slate-50 text-slate-800 text-md leading-relaxed notebook-paper focus:outline-none"
-                                />
-
-                                {analysisResult && (
-                                    <div class="bg-slate-50 p-5 rounded-2xl border border-slate-200 space-y-4">
-                                        <h4 class="font-bold text-primary-600">تقرير المراجعة والتدقيق النحوي</h4>
-                                        <div class="grid grid-cols-3 gap-2 text-center text-xs">
-                                            <div class="p-2.5 bg-white border rounded-xl"><span class="block text-slate-400">القواعد</span><strong class="font-bold text-slate-700">{analysisResult.score.grammar}</strong></div>
-                                            <div class="p-2.5 bg-white border rounded-xl"><span class="block text-slate-400">الإملاء</span><strong class="font-bold text-slate-700">{analysisResult.score.spelling}</strong></div>
-                                            <div class="p-2.5 bg-white border rounded-xl"><span class="block text-slate-400">الأسلوب العام</span><strong class="font-bold text-primary-500">{analysisResult.score.style}</strong></div>
-                                        </div>
-                                        <div class="space-y-2.5 pt-2">
-                                            {analysisResult.corrections.map((corr, idx) => (
-                                                <div key={idx} class="p-3 bg-white rounded-xl border border-slate-100 text-xs space-y-1">
-                                                    <p class="text-red-500 line-through">❌ {corr.original}</p>
-                                                    <p class="text-emerald-600 font-bold">✅ {corr.correct}</p>
-                                                    <p class="text-slate-500 pt-1 border-t mt-1 font-semibold">{corr.explanation}</p>
-                                                </div>
+                                    {(activeWriteTopic.pickedWords || []).length > 0 && (
+                                        <div class="flex flex-wrap gap-2">
+                                            {activeWriteTopic.pickedWords.map((w, idx) => (
+                                                <span key={idx} class="flex items-center gap-1.5 bg-white dark:bg-slate-800 border border-green-200 dark:border-green-900 text-green-700 dark:text-green-400 px-3 py-1 rounded-full text-xs font-bold font-inter">
+                                                    {w}
+                                                    <button onClick={() => handleRemovePickedWord(w)} class="text-green-400 hover:text-red-500">×</button>
+                                                </span>
                                             ))}
                                         </div>
+                                    )}
+
+                                    <AnnotationCanvas
+                                        key={'newwords_' + activeWriteTopic.id}
+                                        initialData={activeWriteTopic.newWordsDrawing || null}
+                                        height={340}
+                                        maxViewHeight={140}
+                                        toolbarPosition="side"
+                                        onSave={(dataUrl) => persistTopicField('newWordsDrawing', dataUrl)}
+                                    />
+                                </div>
+
+                                {/* قسم النص الحر */}
+                                <div class="space-y-3">
+                                    <div class="flex items-center justify-between gap-2 flex-wrap">
+                                        <h4 class="text-sm font-bold text-slate-700 dark:text-slate-200">Text (free writing or answering a question):</h4>
+                                        <div class="flex items-center gap-2 bg-slate-100 dark:bg-slate-800 px-3 py-1.5 rounded-xl">
+                                            <i data-lucide="timer" class="w-4 h-4 text-slate-500"></i>
+                                            <span class="font-mono text-sm font-bold text-slate-700 dark:text-slate-200">{formatTimer(timerSeconds)}</span>
+                                            <button onClick={toggleTimer} class={`text-[11px] font-bold px-2.5 py-1 rounded-lg ${timerRunning ? 'bg-red-500 text-white' : 'bg-primary-500 text-white'}`}>
+                                                {timerRunning ? 'إيقاف' : 'ابدأ'}
+                                            </button>
+                                        </div>
                                     </div>
+
+                                    <AnnotationCanvas
+                                        key={'essay_' + activeWriteTopic.id}
+                                        initialData={activeWriteTopic.essayDrawing || null}
+                                        height={1400}
+                                        maxViewHeight={520}
+                                        toolbarPosition="side"
+                                        onSave={(dataUrl) => persistTopicField('essayDrawing', dataUrl)}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Pick word from Word Practice section popup */}
+                    {isPickingWord && (
+                        <div class="fixed inset-0 bg-slate-900/60 z-[60] flex items-center justify-center p-4">
+                            <div class="bg-white dark:bg-slate-800 w-full max-w-sm rounded-3xl p-6 space-y-4 max-h-[80vh] flex flex-col">
+                                <div class="flex justify-between items-center">
+                                    <h3 class="text-lg font-bold">اختر كلمة من ممارسة المفردات</h3>
+                                    <BackButton onClick={() => setIsPickingWord(false)} label="إغلاق" />
+                                </div>
+
+                                {wordUnits.length === 0 ? (
+                                    <p class="text-xs text-slate-400 text-center py-6">لا توجد رزم في قسم ممارسة المفردات بعد.</p>
+                                ) : (
+                                    <>
+                                        <select value={pickWordUnitId || ''} onChange={(e) => setPickWordUnitId(e.target.value)} class="w-full border p-3 rounded-xl text-sm">
+                                            {wordUnits.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+                                        </select>
+                                        <div class="flex-1 overflow-y-auto space-y-2">
+                                            {wordUnits.find(u => u.id === pickWordUnitId)?.words.map(w => (
+                                                <button
+                                                    key={w.id}
+                                                    onClick={() => handleAddPickedWord(w.text)}
+                                                    class="w-full text-right p-3 bg-slate-50 hover:bg-primary-50 rounded-xl text-sm flex justify-between items-center"
+                                                >
+                                                    <span class="font-bold font-inter">{w.text}</span>
+                                                    <span class="text-[10px] px-2 py-0.5 rounded-full bg-slate-200 text-slate-600">{w.classification}</span>
+                                                </button>
+                                            ))}
+                                            {wordUnits.find(u => u.id === pickWordUnitId)?.words.length === 0 && (
+                                                <p class="text-xs text-slate-400 text-center py-6">لا توجد كلمات في هذه الرزمة.</p>
+                                            )}
+                                        </div>
+                                    </>
                                 )}
                             </div>
-
-                            <footer class="p-4 border-t bg-slate-50 flex justify-between items-center">
-                                <span class="text-xs text-slate-400">ميزة الحفظ التلقائي تعمل تلقائياً</span>
-                                <button onClick={handleAnalyzeText} disabled={isAnalysing} class="bg-primary-500 hover:bg-primary-600 text-white px-6 py-2 rounded-xl font-bold text-xs shadow-md">
-                                    {isAnalysing ? 'جاري الفحص النحوي...' : '✔ فحص وتحقق بالذكاء الاصطناعي'}
-                                </button>
-                            </footer>
                         </div>
                     )}
                 </div>
