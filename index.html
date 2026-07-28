@@ -36,6 +36,11 @@
         .thin-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
         /* لوحة الرسم/التعليق بالقلم أو الإصبع */
         .draw-canvas { touch-action: none; cursor: crosshair; }
+        /* لوحة الكتابة بالقلم: تسمح بالتمرير الأصلي السلس بالإصبع (بما فيها راحة اليد المرتاحة
+           أثناء الكتابة بالقلم الرقمي)، بينما يُمنع التمرير فقط أثناء رسم فعلي بالقلم/الفأرة عبر
+           preventDefault في كود JavaScript (Pointer Events) - هذا يحل مشكلتي التمرير غير السلس
+           وظهور قائمة تحديد النص عند لمس راحة اليد بشكل جذري */
+        .draw-canvas-pen { touch-action: pan-y; cursor: crosshair; }
 
         /* ============ إصلاح عام لوضوح حقول الإدخال بالوضع الليلي ============ */
         /* بعض المتصفحات (خصوصاً Safari/iPad) تفرض تنسيقاً داكناً تلقائياً على عناصر
@@ -2419,71 +2424,86 @@
             const canvasRef = useRef(null);
             const wrapperRef = useRef(null);
             const drawingRef = useRef(false);
-            const lastTouchYRef = useRef(null);
             const autoSaveTimerRef = useRef(null);
             const hasStrokeRef = useRef(false);
+            const undoStackRef = useRef([]); // مكدس صور سابقة لدعم "تراجع خطوة" الحقيقي
             const [mode, setMode] = useState('pen'); // pen | eraser
             const [penColor, setPenColor] = useState(PEN_COLORS[0]);
             const [showColors, setShowColors] = useState(false);
+            const [canUndo, setCanUndo] = useState(false);
             useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [mode, showColors]);
 
             useEffect(() => {
                 const canvas = canvasRef.current;
+                if (!canvas) return;
                 const ctx = canvas.getContext('2d');
                 if (initialData) {
                     const img = new Image();
-                    img.onload = () => ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    img.onload = () => { if (canvasRef.current) ctx.drawImage(img, 0, 0, canvas.width, canvas.height); };
                     img.src = initialData;
                 }
                 // حفظ تلقائي عند الخروج من هذه اللوحة (تغيير الصفحة/إغلاقها) حتى بدون ضغط أي زر
+                // (مع حراسة null لتفادي انهيار كامل التطبيق "الشاشة البيضاء" في حال عدم توفر الكانفاس لحظة الإغلاق)
                 return () => {
-                    if (hasStrokeRef.current) onSave(canvasRef.current.toDataURL('image/png'));
+                    try {
+                        if (hasStrokeRef.current && canvasRef.current) onSave(canvasRef.current.toDataURL('image/png'));
+                    } catch (err) {
+                        console.error('تعذر حفظ لوحة الكتابة عند الإغلاق:', err);
+                    }
                 };
                 // eslint-disable-next-line
             }, []);
 
             const getPos = (e) => {
-                const rect = canvasRef.current.getBoundingClientRect();
-                const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-                const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-                return { x: (clientX - rect.left) * (canvasRef.current.width / rect.width), y: (clientY - rect.top) * (canvasRef.current.height / rect.height) };
+                const canvas = canvasRef.current;
+                if (!canvas) return { x: 0, y: 0 };
+                const rect = canvas.getBoundingClientRect();
+                return { x: (e.clientX - rect.left) * (canvas.width / rect.width), y: (e.clientY - rect.top) * (canvas.height / rect.height) };
             };
 
             const scheduleAutoSave = () => {
                 hasStrokeRef.current = true;
                 if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
                 autoSaveTimerRef.current = setTimeout(() => {
-                    onSave(canvasRef.current.toDataURL('image/png'));
+                    if (canvasRef.current) onSave(canvasRef.current.toDataURL('image/png'));
                 }, 900);
             };
 
+            const pushUndoSnapshot = () => {
+                const canvas = canvasRef.current;
+                if (!canvas) return;
+                try {
+                    undoStackRef.current.push(canvas.toDataURL('image/png'));
+                    if (undoStackRef.current.length > 25) undoStackRef.current.shift(); // حد أقصى لتفادي استهلاك ذاكرة زائد
+                    setCanUndo(true);
+                } catch (err) { /* تجاهل */ }
+            };
+
+            // نعتمد Pointer Events بدل Touch Events لتمييز نوع اللمسة (قلم Apple Pencil مقابل إصبع/راحة اليد):
+            // القلم أو الفأرة فقط يرسمان، أما لمسات الإصبع (بما فيها راحة اليد المرتاحة أثناء الكتابة)
+            // تُترك بالكامل للمتصفح ليعالجها كتمرير طبيعي (Native Scroll) دون أي تدخل من كودنا - هذا
+            // يحل جذرياً مشكلتي: (1) ظهور قائمة تحديد/نسخ عند لمس راحة اليد، و(2) التمرير غير السلس.
             const startDraw = (e) => {
-                if (e.touches && e.touches.length > 1) {
-                    drawingRef.current = false;
-                    lastTouchYRef.current = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-                    return; // إصبعين = تمرير، مو رسم
-                }
+                if (e.pointerType === 'touch') return; // اترك اللمسة للمتصفح (تمرير طبيعي أو راحة يد بلا أي تأثير)
                 e.preventDefault();
+                const canvas = canvasRef.current;
+                if (!canvas) return;
+                if (canvas.setPointerCapture) { try { canvas.setPointerCapture(e.pointerId); } catch (err) {} }
+                pushUndoSnapshot();
                 drawingRef.current = true;
-                const ctx = canvasRef.current.getContext('2d');
+                const ctx = canvas.getContext('2d');
                 const { x, y } = getPos(e);
                 ctx.beginPath();
                 ctx.moveTo(x, y);
             };
 
             const draw = (e) => {
-                if (e.touches && e.touches.length > 1) {
-                    drawingRef.current = false;
-                    const currentY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-                    if (lastTouchYRef.current !== null && wrapperRef.current) {
-                        wrapperRef.current.scrollTop -= (currentY - lastTouchYRef.current);
-                    }
-                    lastTouchYRef.current = currentY;
-                    return;
-                }
+                if (e.pointerType === 'touch') return;
                 if (!drawingRef.current) return;
                 e.preventDefault();
-                const ctx = canvasRef.current.getContext('2d');
+                const canvas = canvasRef.current;
+                if (!canvas) return;
+                const ctx = canvas.getContext('2d');
                 const { x, y } = getPos(e);
                 ctx.lineWidth = mode === 'eraser' ? 20 : 2.2; // 2.2 = سماكة قلم حبر جاف (Ballpoint) رفيعة وطبيعية
                 ctx.lineCap = 'round';
@@ -2497,15 +2517,20 @@
             const endDraw = () => {
                 if (drawingRef.current) scheduleAutoSave();
                 drawingRef.current = false;
-                lastTouchYRef.current = null;
             };
 
-            const clearCanvas = () => {
+            const handleUndo = () => {
+                if (undoStackRef.current.length === 0) return;
                 playHardClick();
                 const canvas = canvasRef.current;
+                if (!canvas) return;
+                const prevDataUrl = undoStackRef.current.pop();
+                setCanUndo(undoStackRef.current.length > 0);
                 const ctx = canvas.getContext('2d');
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
-                scheduleAutoSave();
+                const img = new Image();
+                img.onload = () => { if (canvasRef.current) { ctx.drawImage(img, 0, 0, canvas.width, canvas.height); scheduleAutoSave(); } };
+                img.src = prevDataUrl;
             };
 
             const toolbar = (
@@ -2526,8 +2551,8 @@
                     <button type="button" onClick={() => setMode('eraser')} class={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold ${mode === 'eraser' ? 'bg-primary-500 text-white' : 'bg-slate-100 dark:bg-slate-700 dark:text-slate-200 text-slate-600'}`}>
                         <i data-lucide="eraser" class="w-3.5 h-3.5"></i> {toolbarPosition === 'top' && 'ممسحة'}
                     </button>
-                    <button type="button" onClick={clearCanvas} class="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold bg-slate-100 dark:bg-slate-700 dark:text-slate-200 text-slate-600">
-                        <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i> {toolbarPosition === 'top' && 'تفريغ الكل'}
+                    <button type="button" onClick={handleUndo} disabled={!canUndo} class={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold ${canUndo ? 'bg-slate-100 dark:bg-slate-700 dark:text-slate-200 text-slate-600' : 'bg-slate-50 dark:bg-slate-800 text-slate-300 dark:text-slate-600 cursor-not-allowed'}`}>
+                        <i data-lucide="undo-2" class="w-3.5 h-3.5"></i> {toolbarPosition === 'top' && 'تراجع خطوة'}
                     </button>
                     {toolbarPosition === 'top' && (
                         <span class="mr-auto text-[10px] text-slate-400 flex items-center gap-1"><i data-lucide="check" class="w-3 h-3"></i> يُحفظ تلقائياً</span>
@@ -2535,23 +2560,26 @@
                 </div>
             );
 
+            const canvasEl = (
+                <canvas
+                    ref={canvasRef}
+                    width={600}
+                    height={height}
+                    class="draw-canvas-pen w-full block bg-transparent select-none"
+                    onPointerDown={startDraw} onPointerMove={draw} onPointerUp={endDraw} onPointerCancel={endDraw} onPointerLeave={endDraw}
+                ></canvas>
+            );
+
             if (toolbarPosition === 'side') {
                 return (
                     <div class="space-y-2">
                         <div class="flex gap-3 items-start">
                             <div ref={wrapperRef} class="notebook-paper flex-1 rounded-xl border border-slate-200 overflow-y-auto thin-scroll select-none" style={{ maxHeight: maxViewHeight + 'px', WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }}>
-                                <canvas
-                                    ref={canvasRef}
-                                    width={600}
-                                    height={height}
-                                    class="draw-canvas w-full block bg-transparent select-none"
-                                    onMouseDown={startDraw} onMouseMove={draw} onMouseUp={endDraw} onMouseLeave={endDraw}
-                                    onTouchStart={startDraw} onTouchMove={draw} onTouchEnd={endDraw}
-                                ></canvas>
+                                {canvasEl}
                             </div>
                             <div class="shrink-0 bg-slate-50 dark:bg-slate-800 p-2 rounded-xl">{toolbar}</div>
                         </div>
-                        <p class="text-[10px] text-slate-400 text-center flex items-center justify-center gap-1"><i data-lucide="check" class="w-3 h-3"></i> يُحفظ تلقائياً · مرّر للأسفل داخل الورقة لمساحة أكبر</p>
+                        <p class="text-[10px] text-slate-400 text-center flex items-center justify-center gap-1"><i data-lucide="check" class="w-3 h-3"></i> يُحفظ تلقائياً · مرّر بإصبعك للأسفل داخل الورقة لمساحة أكبر</p>
                     </div>
                 );
             }
@@ -2560,16 +2588,9 @@
                 <div class="space-y-2">
                     {toolbar}
                     <div ref={wrapperRef} class="notebook-paper w-full rounded-xl border border-slate-200 overflow-y-auto thin-scroll select-none" style={{ maxHeight: maxViewHeight + 'px', WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }}>
-                        <canvas
-                            ref={canvasRef}
-                            width={600}
-                            height={height}
-                            class="draw-canvas w-full block bg-transparent select-none"
-                            onMouseDown={startDraw} onMouseMove={draw} onMouseUp={endDraw} onMouseLeave={endDraw}
-                            onTouchStart={startDraw} onTouchMove={draw} onTouchEnd={endDraw}
-                        ></canvas>
+                        {canvasEl}
                     </div>
-                    <p class="text-[10px] text-slate-400 text-center">مرّر للأسفل داخل الورقة للحصول على مساحة كتابة أكبر</p>
+                    <p class="text-[10px] text-slate-400 text-center">مرّر بإصبعك للأسفل داخل الورقة للحصول على مساحة كتابة أكبر</p>
                 </div>
             );
         }
@@ -3364,13 +3385,15 @@
                                     </div>
 
                                     {(activeWriteTopic.pickedWords || []).length > 0 && (
-                                        <div class="flex flex-wrap gap-2">
-                                            {activeWriteTopic.pickedWords.map((w, idx) => (
-                                                <span key={idx} class="flex items-center gap-1.5 bg-white dark:bg-slate-800 border border-green-200 dark:border-green-900 text-green-700 dark:text-green-400 px-3 py-1 rounded-full text-xs font-bold font-inter">
-                                                    {w}
-                                                    <button onClick={() => handleRemovePickedWord(w)} class="text-green-400 hover:text-red-500">×</button>
-                                                </span>
-                                            ))}
+                                        <div class="bg-white dark:bg-slate-800 border border-green-200 dark:border-green-900 rounded-xl p-3">
+                                            <div class="flex flex-wrap gap-2">
+                                                {activeWriteTopic.pickedWords.map((w, idx) => (
+                                                    <span key={idx} class="flex items-center gap-1.5 bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-900 text-green-700 dark:text-green-400 px-3 py-1 rounded-full text-xs font-bold font-inter">
+                                                        {w}
+                                                        <button onClick={() => handleRemovePickedWord(w)} class="text-green-400 hover:text-red-500">×</button>
+                                                    </span>
+                                                ))}
+                                            </div>
                                         </div>
                                     )}
 
@@ -4511,10 +4534,38 @@
             );
         }
 
+        // شبكة أمان أخيرة: لو حصل خطأ غير متوقع بأي مكان بالتطبيق (بدل الانهيار لشاشة بيضاء صامتة)،
+        // تظهر شاشة واضحة فيها زر "إعادة التحميل" حتى يقدر المستخدم يرجع للتطبيق فوراً.
+        class AppErrorBoundary extends React.Component {
+            constructor(props) {
+                super(props);
+                this.state = { hasError: false };
+            }
+            static getDerivedStateFromError() {
+                return { hasError: true };
+            }
+            componentDidCatch(error, info) {
+                console.error('خطأ غير متوقع في التطبيق:', error, info);
+            }
+            render() {
+                if (this.state.hasError) {
+                    return (
+                        <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px', textAlign: 'center', fontFamily: 'Cairo, sans-serif' }}>
+                            <div>
+                                <p style={{ fontSize: '15px', fontWeight: 'bold', color: '#334155', marginBottom: '14px' }}>حدث خطأ غير متوقع. بياناتك محفوظة، فقط أعد تحميل الصفحة.</p>
+                                <button onClick={() => window.location.reload()} style={{ background: '#3b82f6', color: 'white', border: 'none', padding: '10px 22px', borderRadius: '12px', fontWeight: 'bold', fontSize: '13px' }}>إعادة التحميل</button>
+                            </div>
+                        </div>
+                    );
+                }
+                return this.props.children;
+            }
+        }
+
         // Render React Application on Screen
         const container = document.getElementById('root');
         const root = ReactDOM.createRoot(container);
-        root.render(<AuthGate />);
+        root.render(<AppErrorBoundary><AuthGate /></AppErrorBoundary>);
 
         // تسجيل Service Worker لتفعيل التثبيت والعمل بدون إنترنت (PWA)
         if ('serviceWorker' in navigator) {
