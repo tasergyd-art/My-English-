@@ -138,28 +138,13 @@
         let cloudUid = null;
         let cloudSyncTimers = {};
 
-        // كل مفتاح بيانات (srs_decks، reading_units_new...) يُزامن كمستند Firestore مستقل تحت
-        // users/{uid}/data/{key} بدل مستند واحد ضخم لكل البيانات. هذا يمنع مشكلة "اختفاء البطاقات":
-        // سابقاً، تجاوز أي مفتاح واحد لحد 1MB كان يُفشل مزامنة كل البيانات دفعة واحدة بصمت،
-        // وأي جهاز آخر يفتح الحساب كان "يبلع" نسخة سحابية قديمة ناقصة فتختفي البطاقات الجديدة.
-        // الآن: فشل مزامنة مفتاح واحد لا يؤثر على بقية المفاتيح، ويظهر تنبيه صريح يسمي المفتاح المتعطل.
-        // ============ مزامنة دقيقة لبطاقات SRS على مستوى البطاقة الواحدة ============
-        // المشكلة الجذرية: حتى بعد تقسيم البيانات حسب "المفتاح"، كل بطاقات الحفظ (srs_decks) كانت
-        // لا تزال تُرسل كـ"كتلة واحدة"، فإذا صور بطاقتين جديدتين جعلت الكتلة كاملة تتجاوز 1MB،
-        // تفشل مزامنة كل الرزم والبطاقات معاً دفعة واحدة - حتى القديمة السليمة.
-        // الحل: كل بطاقة تُخزَّن كمستند Firestore مستقل بذاته. فشل مزامنة بطاقة واحدة (صورة كبيرة
-        // مثلاً) لا يؤثر إطلاقاً على أي بطاقة أخرى، قديمة كانت أو جديدة.
-        let decksSyncTimer = null;
-
-        function scheduleDecksSync(decks) {
-            if (!cloudUid) return;
-            if (decksSyncTimer) clearTimeout(decksSyncTimer);
-            decksSyncTimer = setTimeout(() => syncDecksNow(decks), 1500);
-        }
+        // كل مفتاح بيانات (reading_units_new، writing_topics...) يُزامن كمستند Firestore مستقل تحت
+        // users/{uid}/data/{key} بدل مستند واحد ضخم لكل البيانات. هذا يمنع فشل مزامنة مفتاح واحد
+        // من التأثير على بقية المفاتيح، ويظهر تنبيه صريح يسمي المفتاح المتعطل عند حدوث مشكلة.
 
         // ينظّف أي كائن من قيم undefined قبل إرساله لـ Firestore (Firestore يرمي خطأ متزامناً
         // غير قابل للالتقاط بـ.catch() العادية لو صادف حقل بقيمة undefined، مما كان يوقف كامل
-        // عملية المزامنة بصمت تام بدون أي تنبيه للمستخدم - وهذا هو السبب الحقيقي للمشكلة)
+        // عملية المزامنة بصمت تام بدون أي تنبيه للمستخدم)
         function sanitizeForFirestore(obj) {
             if (obj === undefined) return null;
             if (obj === null || typeof obj !== 'object') return obj;
@@ -170,31 +155,6 @@
                 clean[k] = v === undefined ? null : sanitizeForFirestore(v);
             });
             return clean;
-        }
-
-        // حذف صريح ومباشر لرزمة وكل بطاقاتها من السحابة - يُستدعى فقط عند ضغط المستخدم زر الحذف فعلياً،
-        // وليس عبر مقارنة "قديم مقابل جديد" (تلك الطريقة كانت خطيرة: أي جهاز بحالة محلية قديمة/غير
-        // مكتملة قد يظن خطأً أن رزماً أو بطاقات "حُذفت" ويرسل أوامر حذف فعلية للسحابة تمسح بيانات
-        // أجهزة أخرى سليمة تماماً - وهذا سبب اختفاء الرزم بين الأجهزة).
-        async function deleteDeckFromCloud(deckId, cardIds) {
-            if (!cloudUid) return;
-            try {
-                const userRef = firebase.firestore().collection('users').doc(cloudUid);
-                const deletes = [userRef.collection('deckMeta').doc(deckId).delete()];
-                (cardIds || []).forEach(cid => deletes.push(userRef.collection('cards').doc(cid).delete()));
-                await Promise.allSettled(deletes);
-            } catch (err) {
-                console.error('تعذر حذف الرزمة من السحابة:', err);
-            }
-        }
-
-        async function deleteCardFromCloud(cardId) {
-            if (!cloudUid) return;
-            try {
-                await firebase.firestore().collection('users').doc(cloudUid).collection('cards').doc(cardId).delete();
-            } catch (err) {
-                console.error('تعذر حذف البطاقة من السحابة:', err);
-            }
         }
 
         // ============ مزامنة دقيقة لقسم الصوتيات (Phonics) ============
@@ -311,84 +271,6 @@
                 ]);
             } catch (err) {
                 console.error('تعذر حذف الحرف من السحابة:', err);
-            }
-        }
-
-        async function syncDecksNow(decks) {
-            if (!cloudUid) return;
-            try {
-                const userRef = firebase.firestore().collection('users').doc(cloudUid);
-                const failedCards = [];
-                const writes = [];
-
-                decks.forEach((deck, idx) => {
-                    const cards = deck.cards || [];
-                    const cardIds = cards.map(c => c.id);
-
-                    writes.push(
-                        userRef.collection('deckMeta').doc(deck.id).set(sanitizeForFirestore({ title: deck.title, order: idx, cardIds }))
-                            .catch(err => console.error('فشل مزامنة بيانات رزمة:', deck.id, err))
-                    );
-
-                    cards.forEach(card => {
-                        writes.push(
-                            userRef.collection('cards').doc(card.id).set(sanitizeForFirestore({ ...card, deckId: deck.id }))
-                                .catch(err => {
-                                    console.error('فشل مزامنة بطاقة واحدة:', card.id, err);
-                                    failedCards.push(card.front || card.id);
-                                })
-                        );
-                    });
-                });
-
-                await Promise.allSettled(writes);
-                if (failedCards.length > 0) {
-                    window.lastCloudSyncOk = false;
-                    if (window.notifyCloudSyncFailure) window.notifyCloudSyncFailure(`بطاقة "${failedCards[0]}" (على الأغلب صورة كبيرة الحجم)`);
-                } else {
-                    window.lastCloudSyncOk = true;
-                }
-            } catch (err) {
-                // أي خطأ غير متوقع (حتى لو متزامن) يُلتقط هنا الآن ويظهر للمستخدم بدل الاختفاء الصامت
-                console.error('خطأ غير متوقع أثناء مزامنة البطاقات:', err);
-                window.lastCloudSyncOk = false;
-                if (window.notifyCloudSyncFailure) window.notifyCloudSyncFailure('خطأ غير متوقع في مزامنة البطاقات: ' + (err && err.message ? err.message : String(err)));
-            }
-        }
-
-        // تحميل البطاقات من البنية الدقيقة الجديدة (رزمة + بطاقات منفصلة). يُستخدم عند تسجيل الدخول.
-        // يُعيد true لو وُجدت بيانات بهذه البنية، أو false لو لا (حساب جديد أو بيانات بالبنية القديمة).
-        async function loadDecksFromCloud(uid) {
-            try {
-                const userRef = firebase.firestore().collection('users').doc(uid);
-                const [deckMetaSnap, cardsSnap] = await Promise.all([
-                    userRef.collection('deckMeta').get({ source: 'server' }),
-                    userRef.collection('cards').get({ source: 'server' })
-                ]);
-                if (deckMetaSnap.empty) return false;
-
-                const cardsByDeck = {};
-                cardsSnap.forEach(docSnap => {
-                    const card = { id: docSnap.id, ...docSnap.data() };
-                    const deckId = card.deckId;
-                    delete card.deckId;
-                    if (!cardsByDeck[deckId]) cardsByDeck[deckId] = [];
-                    cardsByDeck[deckId].push(card);
-                });
-
-                const ordered = [];
-                deckMetaSnap.forEach(docSnap => {
-                    const meta = docSnap.data();
-                    ordered.push({ order: typeof meta.order === 'number' ? meta.order : 999, deck: { id: docSnap.id, title: meta.title, cards: cardsByDeck[docSnap.id] || [] } });
-                });
-                ordered.sort((a, b) => a.order - b.order);
-                const finalDecks = ordered.map(o => o.deck);
-
-                localStorage.setItem('srs_decks', JSON.stringify(finalDecks));
-                return true;
-            } catch (err) {
-                console.error('تعذر تحميل البطاقات من السحابة:', err);
-                return false;
             }
         }
 
@@ -559,56 +441,6 @@
         }
 
         // ==========================================
-        // 1. ENGINE / SCHEDULER: Spaced Repetition System (SRS)
-        // ==========================================
-        class SRSScheduler {
-            static calculate(card, grade) {
-                // Grade: 1 (Again), 2 (Hard), 3 (Good), 4 (Easy)
-                let { easeFactor, interval, repetitions, state, lapses } = card;
-                let nextState = state;
-                let nextLapses = lapses;
-
-                if (grade === 1) { // Again
-                    nextState = 'Relearning';
-                    easeFactor = Math.max(1.3, easeFactor - 0.2);
-                    nextLapses += 1;
-                    interval = 1; // 1 minute/day depending on scale
-                    repetitions = 0;
-                } else if (grade === 2) { // Hard
-                    easeFactor = Math.max(1.3, easeFactor - 0.15);
-                    interval = state === 'New' ? 1 : Math.ceil(interval * 1.2);
-                    repetitions += 1;
-                    nextState = 'Review';
-                } else if (grade === 3) { // Good
-                    if (state === 'New' || state === 'Learning' || state === 'Relearning') {
-                        interval = repetitions === 0 ? 1 : repetitions === 1 ? 6 : Math.ceil(interval * easeFactor);
-                        repetitions += 1;
-                        nextState = 'Review';
-                    } else {
-                        interval = Math.ceil(interval * easeFactor);
-                        repetitions += 1;
-                    }
-                } else if (grade === 4) { // Easy
-                    easeFactor = easeFactor + 0.15;
-                    interval = state === 'New' ? 4 : Math.ceil(interval * easeFactor * 1.3);
-                    repetitions += 1;
-                    nextState = 'Review';
-                }
-
-                const dueDate = new Date();
-                dueDate.setDate(dueDate.getDate() + interval);
-
-                return {
-                    easeFactor: parseFloat(easeFactor.toFixed(2)),
-                    interval,
-                    repetitions,
-                    lapses: nextLapses,
-                    state: nextState,
-                    dueDate: dueDate.toISOString()
-                };
-            }
-        }
-
         // قاعدة بيانات الحقائق التحفيزية (أكثر من 100 حقيقة مقسمة)
         const MOTIVATIONAL_FACTS = [
             "أكثر من مليار ونصف شخص يستخدم الإنجليزية حول العالم.",
@@ -653,7 +485,17 @@
 
 
         // أدوات مساعدة للتاريخ (لحساب الاستمرارية والتذكيرات اليومية)
-        const todayKey = () => new Date().toISOString().slice(0, 10);
+        // مفتاح "اليوم" يجب أن يُحسب بالتوقيت المحلي للمستخدم وليس UTC (toISOString يحوّل دائماً
+        // للتوقيت العالمي) - وهذا كان السبب الحقيقي لانكسار السلسلة رغم النشاط الفعلي المتواصل،
+        // لأن استخدام التطبيق قرب منتصف الليل بتوقيت العراق (UTC+3) كان يجعل "اليوم" المحسوب يتراجع
+        // ليوم كامل للخلف أحياناً بسبب فرق التوقيت.
+        const todayKey = () => {
+            const d = new Date();
+            const y = d.getFullYear();
+            const m = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return `${y}-${m}-${day}`;
+        };
         const daysBetween = (d1, d2) => Math.round((new Date(d2) - new Date(d1)) / 86400000);
 
         // مجموعة تذكيرات افتراضية تُستخدم للتعبئة التلقائية بعد الساعة 12 ظهراً
@@ -674,6 +516,25 @@
                 localStorage.setItem('streak_last_active', new Date().toISOString().slice(0, 10));
                 localStorage.setItem('app_migration_flag', MIGRATION_FLAG);
             }
+        })();
+
+        // ترحيل تصحيحي: إصلاح خطأ حساب "اليوم" بتوقيت UTC كان يكسر السلسلة رغم النشاط الفعلي
+        // المتواصل. إذا كان آخر نشاط مسجّل هو اليوم أو أمس فعلياً (بالتوقيت المحلي الصحيح الجديد)
+        // لكن السلسلة صفر أو واحد بسبب الخطأ القديم، نعيدها لقيمة معقولة تعكس استمراريتك الحقيقية.
+        (function fixStreakTimezoneBugOnce() {
+            const MIGRATION_FLAG = 'streak_tz_fix_v3';
+            if (localStorage.getItem('app_migration_flag') === MIGRATION_FLAG) return;
+            try {
+                const last = localStorage.getItem('streak_last_active');
+                const currentStreak = parseInt(localStorage.getItem('streak_count') || '0', 10);
+                if (last) {
+                    const gap = Math.abs(daysBetween(last, todayKey()));
+                    if (gap <= 1 && currentStreak <= 1) {
+                        localStorage.setItem('streak_count', '2');
+                    }
+                }
+            } catch (err) { /* تجاهل */ }
+            localStorage.setItem('app_migration_flag', MIGRATION_FLAG);
         })();
 
         // ==========================================
@@ -712,11 +573,9 @@
             });
 
             // LOCAL PERSISTED DATABASES
-            const [decks, setDecks] = useState(() => {
-                const saved = localStorage.getItem('srs_decks');
-                return saved ? JSON.parse(saved) : [
-                    { id: '1', title: 'أساسيات يومية', cards: [] }
-                ];
+            const [differencesLists, setDifferencesLists] = useState(() => {
+                const saved = localStorage.getItem('differences_lists');
+                return saved ? JSON.parse(saved) : [];
             });
 
             // ممارسة الكلمات
@@ -807,10 +666,7 @@
             });
 
             // Save Databases to LocalStorage on Change
-            useEffect(() => {
-                try { localStorage.setItem('srs_decks', JSON.stringify(decks)); } catch (err) { console.error('تعذر حفظ البطاقات محلياً:', err); }
-                scheduleDecksSync(decks); // مزامنة دقيقة على مستوى البطاقة الواحدة بدل الرزمة كاملة
-            }, [decks]);
+            useEffect(() => { safeSetLocalStorage('differences_lists', JSON.stringify(differencesLists)); }, [differencesLists]);
             useEffect(() => { safeSetLocalStorage('word_units', JSON.stringify(wordUnits)); }, [wordUnits]);
             useEffect(() => { safeSetLocalStorage('completed_lessons', JSON.stringify(completedLessons)); }, [completedLessons]);
             useEffect(() => { safeSetLocalStorage('grammar_status', JSON.stringify(grammarStatus)); }, [grammarStatus]);
@@ -966,12 +822,10 @@
                             />
                         )}
                         {currentTab === 'vocabulary' && (
-                            <VocabularyScreen
-                                decks={decks}
-                                setDecks={setDecks}
+                            <DifferencesScreen
+                                lists={differencesLists}
+                                setLists={setDifferencesLists}
                                 onAddStats={makeStatAdder('vocabulary')}
-                                wordUnits={wordUnits}
-                                setWordUnits={setWordUnits}
                             />
                         )}
                         {currentTab === 'practice' && <PracticeHubScreen onNavigate={setCurrentTab} />}
@@ -1063,7 +917,7 @@
                     {/* Bottom Navigation */}
                     <nav class="fixed bottom-0 left-0 right-0 bg-white/95 dark:bg-slate-950/95 backdrop-blur border-t border-slate-100 dark:border-slate-800 py-2 flex justify-around items-center z-40">
                         <NavigationButton active={currentTab === 'home'} icon="home" label="الرئيسية" onClick={() => setCurrentTab('home')} />
-                        <NavigationButton active={currentTab === 'vocabulary'} icon="bookmark" label="المفردات" onClick={() => setCurrentTab('vocabulary')} />
+                        <NavigationButton active={currentTab === 'vocabulary'} icon="git-compare" label="الفروقات" onClick={() => setCurrentTab('vocabulary')} />
                         <NavigationButton active={currentTab === 'practice'} icon="activity" label="الممارسة" onClick={() => setCurrentTab('practice')} />
                         <NavigationButton active={currentTab === 'books'} icon="book-open" label="كتبي" onClick={() => setCurrentTab('books')} />
                         <NavigationButton active={currentTab === 'word_practice'} icon="type" label="الكلمات" onClick={() => setCurrentTab('word_practice')} />
@@ -1364,506 +1218,180 @@
         }
 
         // ==========================================
-        // 4. VOCABULARY SCREEN (SRS ENGINE DRIVEN)
+        // قسم الفروقات (Differences): قوائم مقارنات، كل قائمة فيها بطاقات (عنوان + شرح الفرق)
         // ==========================================
-        function VocabularyScreen({ decks, setDecks, onAddStats, wordUnits, setWordUnits }) {
-            const [selectedDeck, setSelectedDeck] = useState(null);
-            const [isReviewing, setIsReviewing] = useState(false);
+        function DifferencesScreen({ lists, setLists, onAddStats }) {
+            const [selectedListId, setSelectedListId] = useState(null);
+            const [isAddingList, setIsAddingList] = useState(false);
+            const [newListTitle, setNewListTitle] = useState('');
+
             const [isAddingCard, setIsAddingCard] = useState(false);
-            const [isAddingDeck, setIsAddingDeck] = useState(false);
-            const [managingDeck, setManagingDeck] = useState(null); // لعرض/حذف بطاقات رزمة معينة
-            const [copyingCard, setCopyingCard] = useState(null); // البطاقة المراد نسخها لقسم ممارسة المفردات
-            const [copyTargetUnitId, setCopyTargetUnitId] = useState(null);
-            const [copyClassification, setCopyClassification] = useState('Noun');
-            const [copyNewUnitName, setCopyNewUnitName] = useState('');
-            const [isPickingWord, setIsPickingWord] = useState(false);
-            const [pickWordUnitId, setPickWordUnitId] = useState(null);
-
-            // Inputs
-            const [newDeckTitle, setNewDeckTitle] = useState('');
-            const [frontText, setFrontText] = useState('');
-            const [backText, setBackText] = useState('');
-            const [frontImage, setFrontImage] = useState(null);
-            const [frontAudio, setFrontAudio] = useState(null);
-            const [backImage, setBackImage] = useState(null);
-            const [backAudio, setBackAudio] = useState(null);
-            const [frontUploading, setFrontUploading] = useState(false);
-            const [backUploading, setBackUploading] = useState(false);
-
-            // Search
+            const [cardTitle, setCardTitle] = useState('');
+            const [cardText, setCardText] = useState('');
+            const [editingCardId, setEditingCardId] = useState(null);
+            const [expandedCardId, setExpandedCardId] = useState(null);
             const [searchQuery, setSearchQuery] = useState('');
 
-            // Review Session State
-            const [reviewCards, setReviewCards] = useState([]);
-            const [currentCardIndex, setCurrentCardIndex] = useState(0);
-            const [revealAnswer, setRevealAnswer] = useState(false);
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [selectedListId, isAddingList, isAddingCard, expandedCardId]);
 
-            useEffect(() => { if (window.lucide) window.lucide.createIcons(); }, [isReviewing, managingDeck, isAddingCard, isAddingDeck, selectedDeck, decks.length, copyingCard, isPickingWord]);
+            const selectedList = lists.find(l => l.id === selectedListId) || null;
 
-            // Statistics computation
-            const stats = useMemo(() => {
-                let totalCards = 0;
-                let dueCount = 0;
-                let learning = 0, review = 0, newCards = 0;
-
-                decks.forEach(d => {
-                    d.cards.forEach(c => {
-                        totalCards++;
-                        const isDue = new Date(c.dueDate) <= new Date();
-                        if (isDue) dueCount++;
-                        if (c.state === 'New') newCards++;
-                        else if (c.state === 'Learning' || c.state === 'Relearning') learning++;
-                        else if (c.state === 'Review') review++;
-                    });
-                });
-
-                return { totalCards, dueCount, learning, review, newCards };
-            }, [decks]);
-
-            // Start review for all due cards of a deck
-            const startReviewSession = (deck) => {
-                const now = new Date();
-                const due = deck.cards.filter(c => new Date(c.dueDate) <= now);
-                if (due.length > 0) {
-                    setReviewCards(due);
-                    setCurrentCardIndex(0);
-                    setRevealAnswer(false);
-                    setIsReviewing(true);
-                } else {
-                    alert("لا توجد بطاقات مستحقة للمراجعة حالياً!");
-                }
-            };
-
-            // Handle user choice rating on a card
-            const handleRateCard = (grade) => {
-                if (grade === 1) { playWrongSound(); } else { playCorrectSound(); }
-                const currentCard = reviewCards[currentCardIndex];
-                const updatedStats = SRSScheduler.calculate(currentCard, grade);
-
-                // Update the persisted state
-                setDecks(prev => prev.map(d => {
-                    return {
-                        ...d,
-                        cards: d.cards.map(c => c.id === currentCard.id ? { ...c, ...updatedStats } : c)
-                    };
-                }));
-
-                onAddStats(); // Increment global counter
-
-                if (currentCardIndex + 1 < reviewCards.length) {
-                    setCurrentCardIndex(prev => prev + 1);
-                    setRevealAnswer(false);
-                } else {
-                    setIsReviewing(false);
-                    alert("انتهت مراجعات اليوم بنجاح! أحسنت عملًا.");
-                }
-            };
-
-            // Create Deck
-            const handleCreateDeck = () => {
-                if (!newDeckTitle.trim()) return;
-                const newDeck = {
-                    id: Date.now().toString(),
-                    title: newDeckTitle,
-                    cards: []
-                };
-                setDecks([...decks, newDeck]);
-                setNewDeckTitle('');
-                setIsAddingDeck(false);
-            };
-
-            // Delete Deck
-            const handleDeleteDeck = (deckId) => {
-                if (!confirm('هل أنت متأكد من حذف هذه الرزمة وجميع بطاقاتها؟')) return;
-                const deckToDelete = decks.find(d => d.id === deckId);
-                setDecks(decks.filter(d => d.id !== deckId));
-                deleteDeckFromCloud(deckId, deckToDelete ? deckToDelete.cards.map(c => c.id) : []);
-            };
-
-            // Delete Card
-            const handleDeleteCard = (deckId, cardId) => {
-                setDecks(prev => prev.map(d => d.id === deckId ? { ...d, cards: d.cards.filter(c => c.id !== cardId) } : d));
-                deleteCardFromCloud(cardId);
-            };
-
-            // نسخ كلمة من بطاقة SRS إلى قسم "ممارسة المفردات" مع تحديد تصنيفها (اسم/فعل)
-            const handleConfirmCopyToPractice = () => {
-                if (!copyingCard) return;
-                const wordText = copyingCard.back.trim() || copyingCard.front.trim();
-                if (!wordText) { alert('لا يوجد نص بهذه البطاقة لنسخه.'); return; }
-
-                let targetUnitId = copyTargetUnitId;
-                let nextUnits = wordUnits;
-
-                // إنشاء رزمة جديدة إذا اختار المستخدم ذلك أو لا توجد رزم بعد
-                if (copyTargetUnitId === '__new__' || wordUnits.length === 0) {
-                    const name = copyNewUnitName.trim() || 'رزمة منسوخة من المفردات';
-                    const newUnit = { id: Date.now().toString(), name, words: [] };
-                    nextUnits = [...wordUnits, newUnit];
-                    targetUnitId = newUnit.id;
-                }
-
-                const newWord = {
-                    id: Date.now().toString() + '_c',
-                    text: wordText,
-                    classification: copyClassification,
-                    boxes: [false, false, false, false, false],
-                    priority: null
-                };
-
-                setWordUnits(nextUnits.map(u => u.id === targetUnitId ? { ...u, words: [...u.words, newWord] } : u));
+            const handleCreateList = () => {
+                if (!newListTitle.trim()) return;
+                const newList = { id: Date.now().toString(), title: newListTitle.trim(), cards: [] };
+                setLists([...lists, newList]);
+                setNewListTitle('');
+                setIsAddingList(false);
                 playHardClick();
-                setCopyingCard(null);
-                setCopyNewUnitName('');
-                alert(`تم نسخ "${wordText}" إلى قسم ممارسة المفردات بنجاح.`);
             };
 
-            const resetCardForm = () => {
-                setFrontText(''); setBackText('');
-                setFrontImage(null); setFrontAudio(null);
-                setBackImage(null); setBackAudio(null);
+            const handleDeleteList = (listId) => {
+                if (!confirm('حذف هذه القائمة وكل الفروقات بداخلها؟')) return;
+                playHardClick();
+                setLists(prev => prev.filter(l => l.id !== listId));
+                if (selectedListId === listId) setSelectedListId(null);
             };
 
-            // Create Card
-            const handleCreateCard = () => {
-                const hasFront = frontText.trim() || frontImage || frontAudio;
-                const hasBack = backText.trim() || backImage || backAudio;
-                if (!hasFront || !hasBack || !selectedDeck) {
-                    alert('أضف محتوى للوجه الأمامي والخلفي (نص أو صورة أو صوت) قبل الحفظ.');
-                    return;
+            const resetCardForm = () => { setCardTitle(''); setCardText(''); setEditingCardId(null); };
+
+            const openAddCard = () => { resetCardForm(); setIsAddingCard(true); };
+
+            const openEditCard = (card) => {
+                setEditingCardId(card.id);
+                setCardTitle(card.title);
+                setCardText(card.text);
+                setIsAddingCard(true);
+            };
+
+            const handleSaveCard = () => {
+                if (!cardTitle.trim() || !selectedList) return;
+                playHardClick();
+                if (editingCardId) {
+                    setLists(prev => prev.map(l => l.id !== selectedList.id ? l : {
+                        ...l, cards: l.cards.map(c => c.id === editingCardId ? { ...c, title: cardTitle.trim(), text: cardText } : c)
+                    }));
+                } else {
+                    const newCard = { id: Date.now().toString(), title: cardTitle.trim(), text: cardText };
+                    setLists(prev => prev.map(l => l.id === selectedList.id ? { ...l, cards: [...l.cards, newCard] } : l));
+                    onAddStats(2);
                 }
-
-                const newCard = {
-                    id: Date.now().toString(),
-                    front: frontText,
-                    frontImage, frontAudio,
-                    back: backText,
-                    backImage, backAudio,
-                    easeFactor: 2.5,
-                    interval: 0,
-                    repetitions: 0,
-                    lapses: 0,
-                    dueDate: new Date().toISOString(),
-                    state: 'New'
-                };
-
-                setDecks(prev => prev.map(d => {
-                    if (d.id === selectedDeck.id) {
-                        return { ...d, cards: [...d.cards, newCard] };
-                    }
-                    return d;
-                }));
-
                 resetCardForm();
                 setIsAddingCard(false);
             };
 
-            return (
-                <div class="space-y-6">
-                    {/* Upper stats bar */}
-                    <div class="grid grid-cols-4 gap-4 bg-slate-50 dark:bg-slate-800/40 p-4 rounded-2xl border border-slate-100 dark:border-slate-800">
-                        <div class="text-center">
-                            <span class="block text-2xl font-black text-primary-500 font-inter">{stats.totalCards}</span>
-                            <span class="text-xs text-slate-400">إجمالي البطاقات</span>
-                        </div>
-                        <div class="text-center">
-                            <span class="block text-2xl font-black text-amber-500 font-inter">{stats.dueCount}</span>
-                            <span class="text-xs text-slate-400">مستحق المراجعة</span>
-                        </div>
-                        <div class="text-center">
-                            <span class="block text-2xl font-black text-blue-500 font-inter">{stats.learning}</span>
-                            <span class="text-xs text-slate-400">قيد التعلم</span>
-                        </div>
-                        <div class="text-center">
-                            <span class="block text-2xl font-black text-slate-500 font-inter">{stats.review}</span>
-                            <span class="text-xs text-slate-400">تثبيت ومراجعة</span>
-                        </div>
-                    </div>
+            const handleDeleteCard = (cardId) => {
+                if (!confirm('حذف هذا الفرق؟')) return;
+                playHardClick();
+                setLists(prev => prev.map(l => l.id !== selectedList.id ? l : { ...l, cards: l.cards.filter(c => c.id !== cardId) }));
+                if (expandedCardId === cardId) setExpandedCardId(null);
+            };
 
-                    {/* Search bar within cards */}
-                    <div class="relative">
-                        <input
-                            type="text"
-                            placeholder="البحث داخل البطاقات والمفردات..."
-                            value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
-                            class="w-full pl-10 pr-4 py-3 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
-                        />
-                        <i data-lucide="search" class="absolute left-3.5 top-3.5 text-slate-400 w-4 h-4"></i>
-                    </div>
+            // ===================== شاشة داخل قائمة واحدة: بطاقات الفروقات =====================
+            if (selectedList) {
+                const filteredCards = selectedList.cards.filter(c =>
+                    !searchQuery.trim() ||
+                    c.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                    c.text.toLowerCase().includes(searchQuery.toLowerCase())
+                );
+                return (
+                    <div class="space-y-6">
+                        <div class="flex items-center justify-between gap-2">
+                            <BackButton onClick={() => { setSelectedListId(null); setSearchQuery(''); }} label="رجوع للقوائم" />
+                            <h2 class="text-lg font-black truncate">{selectedList.title}</h2>
+                            <button onClick={openAddCard} class="bg-primary-500 text-white text-xs px-3 py-1.5 rounded-xl font-bold shrink-0">+ إضافة فرق</button>
+                        </div>
 
-                    {/* Decks Grid */}
-                    {!isReviewing && (
-                        <div class="space-y-4">
-                            <div class="flex justify-between items-center">
-                                <h3 class="text-lg font-bold">رزم المفردات الحالية</h3>
-                                <button onClick={() => setIsAddingDeck(true)} class="bg-primary-500 hover:bg-primary-600 text-white px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5">
-                                    <i data-lucide="plus" class="w-4 h-4"></i>
-                                    إنشاء رزمة جديدة
-                                </button>
-                            </div>
+                        <input type="text" placeholder="ابحث داخل هذه القائمة..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} class="w-full border dark:border-slate-700 dark:bg-slate-800 p-3 rounded-2xl text-sm" />
 
-                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                {decks.filter(d => !searchQuery.trim() || d.title.toLowerCase().includes(searchQuery.toLowerCase()) || d.cards.some(c => c.front.toLowerCase().includes(searchQuery.toLowerCase()) || c.back.toLowerCase().includes(searchQuery.toLowerCase()))).map(deck => {
-                                    const dueCards = deck.cards.filter(c => new Date(c.dueDate) <= new Date());
-                                    return (
-                                        <div key={deck.id} class="bg-white dark:bg-slate-800 border border-slate-100 dark:border-slate-700 p-5 rounded-2xl shadow-sm hover:shadow-md transition-all flex flex-col justify-between">
-                                            <div class="flex justify-between items-start">
-                                                <div>
-                                                    <h4 class="font-bold text-lg text-slate-800 dark:text-slate-100">{deck.title}</h4>
-                                                    <p class="text-xs text-slate-400 mt-1 font-inter">{deck.cards.length} بطاقة إجمالاً</p>
-                                                </div>
-                                                <button onClick={() => handleDeleteDeck(deck.id)} class="text-slate-300 hover:text-red-500 shrink-0">
-                                                    <i data-lucide="trash-2" class="w-4 h-4"></i>
+                        <div class="space-y-3">
+                            {filteredCards.map(card => (
+                                <div key={card.id} class="bg-white dark:bg-slate-800 border border-slate-100 dark:border-slate-700 rounded-3xl overflow-hidden">
+                                    <button
+                                        onClick={() => { playSoftClick(); setExpandedCardId(expandedCardId === card.id ? null : card.id); }}
+                                        class="w-full flex items-center justify-between gap-2 p-4 text-right"
+                                    >
+                                        <span class="font-bold text-slate-800 dark:text-slate-100">{card.title}</span>
+                                        <i data-lucide={expandedCardId === card.id ? 'chevron-up' : 'chevron-down'} class="w-4 h-4 text-slate-400 shrink-0"></i>
+                                    </button>
+                                    {expandedCardId === card.id && (
+                                        <div class="px-4 pb-4 space-y-3 border-t border-slate-100 dark:border-slate-700 pt-3">
+                                            <p class="text-sm leading-relaxed text-slate-600 dark:text-slate-300 whitespace-pre-wrap">{card.text || 'لا يوجد شرح مضاف بعد.'}</p>
+                                            <div class="flex gap-2 justify-end">
+                                                <button onClick={() => openEditCard(card)} class="flex items-center gap-1 bg-slate-100 dark:bg-slate-700 dark:text-slate-200 text-slate-600 text-[11px] px-3 py-1.5 rounded-lg font-bold">
+                                                    <i data-lucide="pencil" class="w-3.5 h-3.5"></i> تعديل
+                                                </button>
+                                                <button onClick={() => handleDeleteCard(card.id)} class="flex items-center gap-1 bg-red-50 text-red-500 text-[11px] px-3 py-1.5 rounded-lg font-bold">
+                                                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i> حذف
                                                 </button>
                                             </div>
-                                            <div class="flex items-center justify-between mt-6 pt-4 border-t border-slate-50 dark:border-slate-700">
-                                                <span class="text-xs font-bold text-amber-500 bg-amber-50 dark:bg-amber-950/30 px-2 py-1 rounded-lg">
-                                                    {dueCards.length} مستحقة اليوم
-                                                </span>
-                                                <div class="flex gap-2">
-                                                    <button onClick={() => setManagingDeck(deck)} class="bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 p-2 rounded-xl text-xs font-semibold">
-                                                        إدارة البطاقات
-                                                    </button>
-                                                    <button onClick={() => { setSelectedDeck(deck); resetCardForm(); setIsAddingCard(true); }} class="bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 p-2 rounded-xl text-xs font-semibold">
-                                                        + إضافة بطاقة
-                                                    </button>
-                                                    <button onClick={() => startReviewSession(deck)} class="bg-primary-500 hover:bg-primary-600 text-white px-4 py-2 rounded-xl text-xs font-bold">
-                                                        ابدأ الدراسة
-                                                    </button>
-                                                </div>
-                                            </div>
                                         </div>
-                                    );
-                                })}
-                            </div>
+                                    )}
+                                </div>
+                            ))}
+                            {filteredCards.length === 0 && (
+                                <p class="text-xs text-slate-400 text-center py-10">لا توجد فروقات هنا بعد. اضغط "+ إضافة فرق" لإضافة أول واحد.</p>
+                            )}
                         </div>
-                    )}
 
-                    {/* REVIEWING POPUP OVERLAY */}
-                    {isReviewing && reviewCards.length > 0 && (
-                        <div class="fixed inset-0 bg-slate-900/80 z-50 flex items-center justify-center p-4">
-                            <div class="bg-white dark:bg-slate-800 w-full max-w-lg rounded-3xl overflow-hidden shadow-2xl p-6 relative">
-                                <button onClick={() => setIsReviewing(false)} class="absolute top-4 right-4 text-slate-400 hover:text-slate-600 flex items-center gap-1">
-                                    <i data-lucide="arrow-right" class="w-5 h-5"></i>
+                        {/* Add/Edit card popup */}
+                        {isAddingCard && (
+                            <div class="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
+                                <div class="bg-white dark:bg-slate-800 w-full max-w-lg rounded-3xl p-6 space-y-4">
+                                    <div class="flex justify-between items-center">
+                                        <h3 class="text-lg font-bold">{editingCardId ? 'تعديل الفرق' : 'إضافة فرق جديد'}</h3>
+                                        <BackButton onClick={() => { setIsAddingCard(false); resetCardForm(); }} label="إغلاق" />
+                                    </div>
+                                    <input type="text" placeholder="عنوان الفرق (مثال: Say vs Tell)..." value={cardTitle} onChange={(e) => setCardTitle(e.target.value)} class="w-full border dark:border-slate-700 dark:bg-slate-900 p-3 rounded-xl text-sm" />
+                                    <textarea placeholder="اشرح الفرق هنا بالتفصيل..." value={cardText} onChange={(e) => setCardText(e.target.value)} class="w-full h-48 border dark:border-slate-700 dark:bg-slate-900 p-3 rounded-xl text-sm leading-relaxed" />
+                                    <div class="flex justify-end gap-2">
+                                        <button onClick={() => { setIsAddingCard(false); resetCardForm(); }} class="px-4 py-2 text-slate-500">إلغاء</button>
+                                        <button onClick={handleSaveCard} class="bg-primary-500 text-white px-6 py-2.5 rounded-xl font-bold">حفظ</button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                );
+            }
+
+            // ===================== شاشة قائمة القوائم =====================
+            return (
+                <div class="space-y-6">
+                    <div class="flex justify-between items-center">
+                        <div>
+                            <h2 class="text-2xl font-black">الفروقات (Differences)</h2>
+                            <p class="text-sm text-slate-400 mt-1">جمّع الفروقات بين الكلمات والتعابير المتشابهة في قوائمك الخاصة</p>
+                        </div>
+                        <button onClick={() => setIsAddingList(true)} class="bg-primary-500 text-white px-4 py-2 rounded-xl text-xs font-bold shrink-0">+ إضافة قائمة</button>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {lists.map(list => (
+                            <div key={list.id} class="bg-white dark:bg-slate-800 border border-slate-100 dark:border-slate-700 rounded-3xl p-5 flex justify-between items-center gap-2">
+                                <div class="flex-1 min-w-0">
+                                    <h4 class="font-bold text-slate-800 dark:text-slate-100 truncate">{list.title}</h4>
+                                    <p class="text-xs text-slate-400 mt-1">{list.cards.length} فرق مضاف</p>
+                                </div>
+                                <button onClick={() => setSelectedListId(list.id)} class="bg-primary-500 text-white text-xs px-4 py-2 rounded-xl font-bold shrink-0">عرض</button>
+                                <button onClick={() => handleDeleteList(list.id)} class="text-slate-300 hover:text-red-500 shrink-0">
+                                    <i data-lucide="trash-2" class="w-4 h-4"></i>
                                 </button>
-
-                                <div class="text-center mb-6">
-                                    <span class="text-xs text-primary-500 font-bold bg-primary-50 dark:bg-primary-950 px-3 py-1 rounded-full">
-                                        بطاقة {currentCardIndex + 1} من {reviewCards.length}
-                                    </span>
-                                </div>
-
-                                <div class="min-h-[220px] flex flex-col justify-center items-center bg-slate-50 dark:bg-slate-900 rounded-2xl p-6 border border-slate-100 dark:border-slate-800 text-center">
-                                    <h2 class="text-2xl font-bold text-slate-800 dark:text-slate-100">{reviewCards[currentCardIndex].front}</h2>
-                                    {reviewCards[currentCardIndex].frontImage && <img src={reviewCards[currentCardIndex].frontImage} class="max-h-28 rounded-xl mt-3" />}
-                                    {reviewCards[currentCardIndex].frontAudio && <audio controls src={reviewCards[currentCardIndex].frontAudio} class="mt-3 h-8"></audio>}
-
-                                    {revealAnswer && (
-                                        <div class="mt-6 pt-6 border-t border-slate-200 dark:border-slate-700 w-full">
-                                            <h3 class="text-xl font-bold text-primary-600">{reviewCards[currentCardIndex].back}</h3>
-                                            {reviewCards[currentCardIndex].backImage && <img src={reviewCards[currentCardIndex].backImage} class="max-h-28 rounded-xl mt-3 mx-auto" />}
-                                            {reviewCards[currentCardIndex].backAudio && <audio controls src={reviewCards[currentCardIndex].backAudio} class="mt-3 h-8"></audio>}
-                                        </div>
-                                    )}
-                                </div>
-
-                                <div class="mt-6">
-                                    {!revealAnswer ? (
-                                        <button onClick={() => setRevealAnswer(true)} class="w-full bg-slate-800 hover:bg-slate-900 text-white py-3.5 rounded-2xl font-bold transition-all shadow-lg">
-                                            إظهار الإجابة
-                                        </button>
-                                    ) : (
-                                        <div class="grid grid-cols-4 gap-2">
-                                            <button onClick={() => handleRateCard(1)} class="bg-red-500 hover:bg-red-600 text-white py-3 rounded-xl text-xs font-bold">Again</button>
-                                            <button onClick={() => handleRateCard(2)} class="bg-orange-500 hover:bg-orange-600 text-white py-3 rounded-xl text-xs font-bold">Hard</button>
-                                            <button onClick={() => handleRateCard(3)} class="bg-blue-500 hover:bg-blue-600 text-white py-3 rounded-xl text-xs font-bold">Good</button>
-                                            <button onClick={() => handleRateCard(4)} class="bg-emerald-500 hover:bg-emerald-600 text-white py-3 rounded-xl text-xs font-bold">Easy</button>
-                                        </div>
-                                    )}
-                                </div>
                             </div>
-                        </div>
-                    )}
+                        ))}
+                        {lists.length === 0 && <p class="text-xs text-slate-400 col-span-2 text-center py-10">لا توجد قوائم بعد. أضف أول قائمة للبدء.</p>}
+                    </div>
 
-                    {/* Create Deck Modal */}
-                    {isAddingDeck && (
+                    {isAddingList && (
                         <div class="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
                             <div class="bg-white dark:bg-slate-800 w-full max-w-md rounded-3xl p-6 space-y-4">
                                 <div class="flex justify-between items-center">
-                                    <h3 class="text-lg font-bold">إنشاء رزمة جديدة</h3>
-                                    <BackButton onClick={() => setIsAddingDeck(false)} label="إغلاق" />
+                                    <h3 class="text-lg font-bold">إضافة قائمة جديدة</h3>
+                                    <BackButton onClick={() => setIsAddingList(false)} label="إغلاق" />
                                 </div>
-                                <input
-                                    type="text"
-                                    placeholder="اسم الرزمة..."
-                                    value={newDeckTitle}
-                                    onChange={(e) => setNewDeckTitle(e.target.value)}
-                                    class="w-full border border-slate-200 dark:border-slate-700 p-3 rounded-xl text-sm"
-                                />
+                                <input type="text" placeholder="اسم القائمة (مثال: أفعال متشابهة)..." value={newListTitle} onChange={(e) => setNewListTitle(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') handleCreateList(); }} class="w-full border dark:border-slate-700 dark:bg-slate-900 p-3 rounded-xl text-sm" />
                                 <div class="flex justify-end gap-2">
-                                    <button onClick={() => setIsAddingDeck(false)} class="px-4 py-2 text-slate-500">إلغاء</button>
-                                    <button onClick={handleCreateDeck} class="bg-primary-500 text-white px-5 py-2 rounded-xl">إنشاء</button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Manage cards (view/delete) Modal */}
-                    {managingDeck && (
-                        <div class="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
-                            <div class="bg-white dark:bg-slate-800 w-full max-w-lg h-[75vh] rounded-3xl overflow-hidden flex flex-col">
-                                <div class="p-5 border-b flex justify-between items-center bg-slate-50 dark:bg-slate-800/60">
-                                    <BackButton onClick={() => setManagingDeck(null)} />
-                                    <h3 class="font-bold">بطاقات {managingDeck.title}</h3>
-                                    <span class="w-10"></span>
-                                </div>
-                                <div class="flex-1 overflow-y-auto p-5 space-y-3">
-                                    {decks.find(d => d.id === managingDeck.id)?.cards.map(card => (
-                                        <div key={card.id} class="p-3 bg-slate-50 dark:bg-slate-900 rounded-xl flex justify-between items-center gap-2">
-                                            <div class="text-xs">
-                                                <p class="font-bold">{card.front}</p>
-                                                <p class="text-slate-400">{card.back}</p>
-                                            </div>
-                                            <div class="flex items-center gap-2 shrink-0">
-                                                <button onClick={() => { setCopyingCard(card); setCopyTargetUnitId(wordUnits[0]?.id || null); setCopyClassification('Noun'); }} title="نسخ إلى ممارسة المفردات" class="text-slate-400 hover:text-primary-500">
-                                                    <i data-lucide="copy" class="w-4 h-4"></i>
-                                                </button>
-                                                <button onClick={() => handleDeleteCard(managingDeck.id, card.id)} class="text-slate-300 hover:text-red-500">
-                                                    <i data-lucide="trash-2" class="w-4 h-4"></i>
-                                                </button>
-                                            </div>
-                                        </div>
-                                    ))}
-                                    {decks.find(d => d.id === managingDeck.id)?.cards.length === 0 && (
-                                        <p class="text-xs text-slate-400 text-center py-6">لا توجد بطاقات في هذه الرزمة بعد.</p>
-                                    )}
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Copy word to Word Practice section popup */}
-                    {copyingCard && (
-                        <div class="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
-                            <div class="bg-white dark:bg-slate-800 w-full max-w-sm rounded-3xl p-6 space-y-4">
-                                <div class="flex justify-between items-center">
-                                    <h3 class="text-lg font-bold">نسخ "{copyingCard.back || copyingCard.front}" إلى ممارسة المفردات</h3>
-                                    <BackButton onClick={() => setCopyingCard(null)} label="إغلاق" />
-                                </div>
-
-                                <div class="space-y-2">
-                                    <label class="text-[11px] font-bold text-slate-500">الرزمة الوجهة:</label>
-                                    <select value={copyTargetUnitId || ''} onChange={(e) => setCopyTargetUnitId(e.target.value)} class="w-full border p-3 rounded-xl text-sm">
-                                        {wordUnits.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
-                                        <option value="__new__">+ إنشاء رزمة جديدة</option>
-                                    </select>
-                                    {(copyTargetUnitId === '__new__' || wordUnits.length === 0) && (
-                                        <input type="text" placeholder="اسم الرزمة الجديدة..." value={copyNewUnitName} onChange={(e) => setCopyNewUnitName(e.target.value)} class="w-full border p-3 rounded-xl text-sm" />
-                                    )}
-                                </div>
-
-                                <div class="space-y-2">
-                                    <label class="text-[11px] font-bold text-slate-500">تصنيف الكلمة:</label>
-                                    <select value={copyClassification} onChange={(e) => setCopyClassification(e.target.value)} class="w-full border p-3 rounded-xl text-sm bg-white">
-                                        <option value="Noun">Noun (اسم)</option>
-                                        <option value="Verb">Verb (فعل)</option>
-                                        <option value="Adjective">Adjective (صفة)</option>
-                                        <option value="Adverb">Adverb (ظرف)</option>
-                                        <option value="Preposition">Preposition (حرف جر)</option>
-                                        <option value="Conjunction">Conjunction (حرف عطف)</option>
-                                        <option value="Interjection">Interjection (حرف تعجب)</option>
-                                    </select>
-                                </div>
-
-                                <div class="flex justify-end gap-2">
-                                    <button onClick={() => setCopyingCard(null)} class="px-4 py-2 text-slate-500">إلغاء</button>
-                                    <button onClick={handleConfirmCopyToPractice} class="bg-primary-500 text-white px-5 py-2 rounded-xl font-bold">نسخ</button>
-                                </div>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Pick word from Word Practice section to insert into card */}
-                    {isPickingWord && (
-                        <div class="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
-                            <div class="bg-white dark:bg-slate-800 w-full max-w-sm rounded-3xl p-6 space-y-4 max-h-[80vh] flex flex-col">
-                                <div class="flex justify-between items-center">
-                                    <h3 class="text-lg font-bold">اختر كلمة من ممارسة المفردات</h3>
-                                    <BackButton onClick={() => setIsPickingWord(false)} label="إغلاق" />
-                                </div>
-
-                                {wordUnits.length === 0 ? (
-                                    <p class="text-xs text-slate-400 text-center py-6">لا توجد رزم في قسم ممارسة المفردات بعد.</p>
-                                ) : (
-                                    <>
-                                        <select value={pickWordUnitId || ''} onChange={(e) => setPickWordUnitId(e.target.value)} class="w-full border p-3 rounded-xl text-sm">
-                                            {wordUnits.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
-                                        </select>
-                                        <div class="flex-1 overflow-y-auto space-y-2">
-                                            {wordUnits.find(u => u.id === pickWordUnitId)?.words.map(w => (
-                                                <button
-                                                    key={w.id}
-                                                    onClick={() => { setFrontText(w.text); playSoftClick(); setIsPickingWord(false); }}
-                                                    class="w-full text-right p-3 bg-slate-50 hover:bg-primary-50 rounded-xl text-sm flex justify-between items-center"
-                                                >
-                                                    <span class="font-bold font-inter">{w.text}</span>
-                                                    <span class="text-[10px] px-2 py-0.5 rounded-full bg-slate-200 text-slate-600">{w.classification}</span>
-                                                </button>
-                                            ))}
-                                            {wordUnits.find(u => u.id === pickWordUnitId)?.words.length === 0 && (
-                                                <p class="text-xs text-slate-400 text-center py-6">لا توجد كلمات في هذه الرزمة.</p>
-                                            )}
-                                        </div>
-                                    </>
-                                )}
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Create Card Modal */}
-                    {isAddingCard && (
-                        <div class="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4">
-                            <div class="bg-white dark:bg-slate-800 w-full max-w-md rounded-3xl p-6 space-y-4 max-h-[85vh] overflow-y-auto">
-                                <div class="flex justify-between items-center">
-                                    <h3 class="text-lg font-bold">إضافة بطاقة إلى: {selectedDeck?.title}</h3>
-                                    <BackButton onClick={() => setIsAddingCard(false)} label="إغلاق" />
-                                </div>
-
-                                <div class="space-y-2 p-3 bg-slate-50 dark:bg-slate-900 rounded-xl">
-                                    <label class="text-[11px] font-bold text-slate-500">الوجه الأمامي</label>
-                                    <input
-                                        type="text"
-                                        placeholder="نص الوجه الأمامي (مثلاً: الكلمة بالإنجليزية)..."
-                                        value={frontText}
-                                        onChange={(e) => setFrontText(e.target.value)}
-                                        class="w-full border border-slate-200 dark:border-slate-700 p-3 rounded-xl text-sm"
-                                    />
-                                    <MediaAttachments image={frontImage} onImageChange={setFrontImage} audio={frontAudio} onAudioChange={setFrontAudio} onUploadingChange={setFrontUploading} hideAudio={true} />
-                                </div>
-
-                                <div class="space-y-2 p-3 bg-slate-50 dark:bg-slate-900 rounded-xl">
-                                    <div class="flex items-center justify-between">
-                                        <label class="text-[11px] font-bold text-slate-500">الوجه الخلفي</label>
-                                        <button type="button" onClick={() => { setIsPickingWord(true); setPickWordUnitId(wordUnits[0]?.id || null); }} class="flex items-center gap-1 bg-primary-50 text-primary-600 px-2.5 py-1 rounded-lg text-[11px] font-bold">
-                                            <i data-lucide="list-plus" class="w-3.5 h-3.5"></i> كلمات
-                                        </button>
-                                    </div>
-                                    <input
-                                        type="text"
-                                        placeholder="نص الوجه الخلفي (مثلاً: الترجمة والمعنى)..."
-                                        value={backText}
-                                        onChange={(e) => setBackText(e.target.value)}
-                                        class="w-full border border-slate-200 dark:border-slate-700 p-3 rounded-xl text-sm"
-                                    />
-                                    <MediaAttachments image={backImage} onImageChange={setBackImage} audio={backAudio} onAudioChange={setBackAudio} onUploadingChange={setBackUploading} hideAudio={true} />
-                                </div>
-
-                                <div class="flex justify-end gap-2">
-                                    <button onClick={() => setIsAddingCard(false)} class="px-4 py-2 text-slate-500">إلغاء</button>
-                                    <button onClick={handleCreateCard} disabled={frontUploading || backUploading} class={`px-5 py-2 rounded-xl text-white ${frontUploading || backUploading ? 'bg-slate-300 cursor-not-allowed' : 'bg-primary-500'}`}>
-                                        {frontUploading || backUploading ? 'جارٍ رفع الوسائط...' : 'حفظ البطاقة'}
-                                    </button>
+                                    <button onClick={() => setIsAddingList(false)} class="px-4 py-2 text-slate-500">إلغاء</button>
+                                    <button onClick={handleCreateList} class="bg-primary-500 text-white px-5 py-2 rounded-xl font-bold">إنشاء</button>
                                 </div>
                             </div>
                         </div>
@@ -1871,6 +1399,7 @@
                 </div>
             );
         }
+
 
         // ==========================================
         // 5. PRACTICE HUB SCREEN
@@ -4407,23 +3936,20 @@
                         setUser(u);
                         setAuthState('syncing');
                         try {
-                            // تحميل بطاقات SRS بالبنية الدقيقة الجديدة (رزمة + كل بطاقة مستقلة) أولاً
-                            const decksLoadedGranular = await loadDecksFromCloud(u.uid);
-                            // تحميل الصوتيات بنفس البنية الدقيقة (بيانات الحرف + كل مقطع صوتي مستقل)
+                            // تحميل الصوتيات بالبنية الدقيقة (بيانات الحرف + كل مقطع صوتي مستقل)
                             const phonicsLoadedGranular = await loadPhonicsFromCloud(u.uid);
 
                             // باقي المفاتيح: كل مفتاح بيانات محفوظ كمستند مستقل تحت users/{uid}/data/{key}
                             const dataSnap = await firebase.firestore().collection('users').doc(u.uid).collection('data').get();
                             if (!dataSnap.empty) {
                                 dataSnap.forEach(docSnap => {
-                                    if (docSnap.id === 'srs_decks' && decksLoadedGranular) return; // تفادي الكتابة فوق البيانات الدقيقة الأحدث
                                     if (docSnap.id === 'phonics_letters' && phonicsLoadedGranular) return;
                                     const d = docSnap.data();
                                     if (d && typeof d.value === 'string') {
                                         try { localStorage.setItem(docSnap.id, d.value); } catch (e) { /* تجاهل */ }
                                     }
                                 });
-                            } else if (!decksLoadedGranular) {
+                            } else {
                                 // توافق مع البنية القديمة (مستند واحد ضخم) إن وُجدت، كخطوة انتقالية تلقائية لمرة واحدة
                                 const oldDocSnap = await firebase.firestore().collection('users').doc(u.uid).get();
                                 if (oldDocSnap.exists) {
