@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0b1429">
 <title>Study Circle</title>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <style>
 :root{
  --bg:#0b1429;--bg2:#111c35;--card:#fff;--text:#18233d;--muted:#7d8699;
@@ -52,6 +55,36 @@ button,input,select,textarea{font:inherit}button{cursor:pointer}
 .itemList{display:flex;flex-direction:column;gap:10px}.skillItem{background:#fff;border:1px solid #e5e8ef;border-radius:17px;padding:13px;color:var(--text);box-shadow:0 6px 20px #0611260d;cursor:pointer}.skillItemHead{display:flex;justify-content:space-between;align-items:center}.skillItem h4{margin:0;font-size:14px}.skillItem small{color:#8b93a4}.skillItem p{margin:8px 0 0;color:#7e8698;font-size:10px}.addTop{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}.addCircle{width:43px;height:43px;border:0;border-radius:14px;background:linear-gradient(135deg,#6979f2,#8968ed);color:#fff;font-size:24px}
 .words{display:flex;flex-direction:column;gap:8px}.wordRow{display:grid;grid-template-columns:1fr 1fr;gap:7px}.word{padding:10px;border-radius:10px;background:#f4f5f9;color:#1e2941;font-size:12px}.translation{cursor:pointer;position:relative;overflow:hidden;background:#e7e9ef;color:transparent;user-select:none}.translation.revealed{color:#1e2941;background:#f4f5f9}.translation:after{content:"اضغط للكشف";position:absolute;inset:0;display:grid;place-items:center;color:#7e8699;font-size:9px}.translation.revealed:after{display:none}.detailText{white-space:pre-wrap;line-height:1.8;color:#606a7d;font-size:13px}.timer{font-variant-numeric:tabular-nums;font-weight:900;color:#6676ee}
 .books{color:#fff}.books .card{background:#121c38;color:#e8edff;border:1px solid #22305a;box-shadow:none}.levels{display:flex;border:1px solid #27355d;border-radius:16px;overflow:hidden;margin-bottom:15px}.levels button{flex:1;padding:13px;background:#121c38;color:#8d98b9;border:0;font-weight:700}.levels .lv1{background:#f97316;color:#fff}.levels .lv2{background:#3b82f6;color:#fff}.boxes{display:flex;gap:6px;overflow:auto;padding:4px}.box{width:31px;height:31px;flex:0 0 auto;border-radius:9px;border:1px solid #29365e;background:#0f1831;color:#8994b1;display:grid;place-items:center;font-size:11px}.path{position:relative}.course{display:flex;gap:13px;align-items:center;margin-bottom:14px;position:relative}.pct{width:60px;height:60px;border-radius:50%;border:4px solid #26335b;background:#0b1429;color:#8994b1;display:grid;place-items:center;font-size:12px;font-weight:900;flex:none}.pct.part{border-color:#6676ee;color:#a9b2ff}.pct.done{border-color:#22c55e;color:#22c55e}.courseInfo{flex:1;border:1px solid #243158;background:#121c38;border-radius:15px;padding:13px;display:flex;justify-content:space-between;align-items:center;cursor:pointer}.courseInfo b{font-size:13px}.courseInfo small{display:block;color:#8b97b7;font-size:10px;margin-top:4px}
+
+/* fix: check buttons + lessons */
+.check{cursor:pointer;display:grid;place-items:center;padding:0;font-weight:900;font-size:15px;line-height:1}
+.check.on{background:var(--green);border-color:var(--green);color:#fff}
+.lessonRow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:12px 14px;margin-bottom:8px;border-radius:15px;background:#0f1832;border:1px solid #243158;color:#e8edff;font-size:13px;cursor:pointer;user-select:none}
+.lessonRow.done{background:#0f2a26;border-color:#1f6b4a}
+.lessonRow.done span{color:#7be0ae}
+.lessonRow .check{background:#0b1429;border-color:#3a4a78}
+.lessonRow .check.on{background:var(--green);border-color:var(--green)}
+.box.on{color:#fff;font-weight:900}
+/* header extras */
+.hdrBtns{display:flex;align-items:center;gap:8px}
+.syncBadge{font-size:11px;color:#8fa0c4;background:#17233e;border-radius:12px;padding:7px 10px;min-width:64px;text-align:center}
+.syncBadge.ok{color:#5fd6a1}.syncBadge.err{color:#ff8f9b}
+/* auth */
+.authBack{position:fixed;inset:0;z-index:300;background:radial-gradient(120% 80% at 50% 0%,#1a2a55 0%,#0b1429 60%);display:flex;align-items:center;justify-content:center;padding:18px;overflow:auto}
+.authCard{width:min(420px,100%);background:#fff;color:var(--text);border-radius:26px;padding:26px 22px;box-shadow:0 25px 60px #0008}
+.authLogo{width:58px;height:58px;border-radius:19px;background:linear-gradient(135deg,#6979f2,#8968ed);color:#fff;display:grid;place-items:center;font-weight:900;font-size:19px;margin:0 auto 12px}
+.authCard h2{margin:0 0 4px;text-align:center;font-size:22px;color:#1c2a55}
+.authCard .sub{margin:0 0 18px;text-align:center;color:#8991a2;font-size:12px}
+.authTabs{display:flex;background:#f0f1f5;border-radius:14px;padding:4px;margin-bottom:16px}
+.authTabs button{flex:1;border:0;background:transparent;padding:10px;border-radius:11px;color:#6b7488;font-weight:700;font-size:13px}
+.authTabs button.on{background:#fff;color:#4d5fe0;box-shadow:0 3px 10px #0001}
+.authCard .field{margin-bottom:12px}
+.authCard .field input{direction:ltr;text-align:left}
+.authErr{color:#e45865;font-size:12px;min-height:18px;margin:2px 0 8px;text-align:center}
+.authCard .primary{width:100%;padding:13px;font-weight:700}
+.authCard .primary:disabled{opacity:.6}
+.authLink{display:block;margin:12px auto 0;background:transparent;border:0;color:#6877e9;font-size:12px}
+.authLoading{text-align:center;color:#8991a2;font-size:13px;padding:30px 0}
 @media(max-width:760px){.grid2{grid-template-columns:1fr}.progress{grid-template-columns:120px 1fr}.ring{width:112px;height:112px}.ring strong{font-size:25px}}
 @media(max-width:470px){.top{padding:14px}.content{padding:0 14px 100px}.progress{grid-template-columns:1fr}.formGrid{grid-template-columns:1fr}.full{grid-column:auto}.step{grid-template-columns:1fr 75px 75px 33px}.day{height:56px}.titleRow h2{font-size:24px}}
 </style>
@@ -61,7 +94,7 @@ button,input,select,textarea{font:inherit}button{cursor:pointer}
 <header class="top">
  <div class="header">
   <div class="brand"><div class="logo">SC</div><div><h1>Study Circle</h1><p>رحلتك نحو طاقة الإنجليزية</p></div></div>
-  <button onclick="toast('الإشعارات قريبًا')">♧</button>
+  <div class="hdrBtns"><span class="syncBadge hidden" id="syncBadge"></span><button onclick="toast('الإشعارات قريبًا')">♧</button><button id="logoutBtn" class="hidden" title="تسجيل الخروج" onclick="logout()">⎋</button></div>
  </div>
  <div class="titleRow"><h2 id="pageTitle">التخطيط 📅</h2><button class="back" onclick="goBack()">رجوع ←</button></div>
 </header>
@@ -135,6 +168,22 @@ button,input,select,textarea{font:inherit}button{cursor:pointer}
 <div class="modalBack" id="bookModal" onclick="if(event.target===this)closeModal('bookModal')"><div class="modal books"><div class="head"><h3 id="bookTitle"></h3><button class="more" onclick="closeModal('bookModal')">×</button></div><div id="lessons"></div></div></div>
 <div class="toast" id="toast"></div>
 
+<!-- auth -->
+<div class="authBack hidden" id="authScreen"><div class="authCard">
+ <div class="authLogo">SC</div>
+ <h2>Study Circle</h2><p class="sub">سجّل الدخول لتحفظ بياناتك وتفتحها من أي جهاز</p>
+ <div id="authLoading" class="authLoading">جارٍ التحميل…</div>
+ <div id="authBox" class="hidden">
+  <div class="authTabs"><button id="tabIn" class="on" type="button" onclick="setAuthMode('in')">تسجيل الدخول</button><button id="tabUp" type="button" onclick="setAuthMode('up')">حساب جديد</button></div>
+  <div class="field"><label>البريد الإلكتروني</label><input id="authEmail" type="email" autocomplete="email" inputmode="email" placeholder="name@email.com"></div>
+  <div class="field"><label>كلمة المرور</label><input id="authPass" type="password" autocomplete="current-password" placeholder="6 أحرف على الأقل" onkeydown="if(event.key==='Enter')authSubmit()"></div>
+  <div class="authErr" id="authErr"></div>
+  <button class="primary" id="authBtn" type="button" onclick="authSubmit()">دخول</button>
+  <button class="authLink" id="forgotBtn" type="button" onclick="forgotPassword()">نسيت كلمة المرور؟</button>
+ </div>
+</div></div>
+
+
 <script>
 /* ==================== common ==================== */
 const TASK_KEY='studyCircleTasks_v4', SKILL_KEY='studyCircleSkills_v1';
@@ -145,8 +194,8 @@ let currentSkill='',currentTopic=null,timerId=null,timerStart=0;
 function iso(d){return new Date(d.getFullYear(),d.getMonth(),d.getDate()).toISOString().slice(0,10)}
 function pd(s){let [y,m,d]=s.split('-').map(Number);return new Date(y,m-1,d)}
 function today(){return iso(new Date())}
-function saveTasks(){localStorage.setItem(TASK_KEY,JSON.stringify(tasks))}
-function saveSkills(){localStorage.setItem(SKILL_KEY,JSON.stringify(skills))}
+function saveTasks(){localStorage.setItem(TASK_KEY,JSON.stringify(tasks));scheduleSave()}
+function saveSkills(){localStorage.setItem(SKILL_KEY,JSON.stringify(skills));scheduleSave()}
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,7)}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
 function fmtDate(s){return pd(s).toLocaleDateString('ar-IQ',{day:'numeric',month:'short'})}
@@ -291,20 +340,20 @@ const LEVEL_2_COURSES=[
 const ROUND_COLORS=['#6366f1','#f97316','#22c55e','#ec4899','#eab308','#06b6d4'];
 let completedLessons=loadLS('completed_lessons',{}),grammarStatus=loadLS('grammar_status',{currentRound:1,checkedBoxes:{}}),selectedLevel=1,activeCourse=null;
 function loadLS(k,f){try{let v=localStorage.getItem(k);return v?JSON.parse(v):f}catch(e){return f}}
-function saveLS(k,v){localStorage.setItem(k,JSON.stringify(v))}
+function saveLS(k,v){localStorage.setItem(k,JSON.stringify(v));scheduleSave()}
 function setLevel(n){selectedLevel=n;renderBooks()}
 function renderBooks(){
  document.getElementById('lv1').className=selectedLevel===1?'lv1':'';document.getElementById('lv2').className=selectedLevel===2?'lv2':'';
  document.getElementById('roundBadge').textContent='جولة: '+grammarStatus.currentRound;let color=ROUND_COLORS[(grammarStatus.currentRound-1)%ROUND_COLORS.length],b=document.getElementById('grammarBoxes');b.innerHTML='';
- for(let i=0;i<26;i++){let on=!!grammarStatus.checkedBoxes['box_'+i],d=document.createElement('div');d.className='box';d.textContent=on?'✓':i+1;if(on)d.style.background=color;d.onclick=()=>grammarClick(i);b.appendChild(d)}
+ for(let i=0;i<26;i++){let on=!!grammarStatus.checkedBoxes['box_'+i],d=document.createElement('div');d.className='box';d.textContent=on?'✓':i+1;if(on){d.style.background=color;d.classList.add('on')}d.onclick=()=>grammarClick(i);b.appendChild(d)}
  let list=selectedLevel===1?LEVEL_1_COURSES:LEVEL_2_COURSES,wrap=document.getElementById('courses');wrap.innerHTML='';
  list.forEach(c=>{let pct=Math.round(doneCount(c)/c.lessons*100),row=document.createElement('div');row.className='course';row.innerHTML=`<div class="pct ${pct===100?'done':pct?'part':''}">${pct}%</div><div class="courseInfo"><div><b>${esc(c.title)}</b><small>${c.lessons} درس</small></div><span>‹</span></div>`;row.querySelector('.courseInfo').onclick=()=>openBook(c);wrap.appendChild(row)})
 }
 function grammarClick(i){let key='box_'+i,checked={...grammarStatus.checkedBoxes};checked[key]=!checked[key];if(Object.values(checked).filter(Boolean).length===26){let r=grammarStatus.currentRound;grammarStatus={currentRound:r+1,checkedBoxes:{}};saveLS('grammar_status',grammarStatus);renderBooks();toast('أكملت الجولة '+r);return}grammarStatus={currentRound:grammarStatus.currentRound,checkedBoxes:checked};saveLS('grammar_status',grammarStatus);renderBooks()}
 function doneCount(c){let n=0;for(let i=0;i<c.lessons;i++)if(completedLessons[c.id+'_'+i])n++;return n}
 function openBook(c){activeCourse=c;document.getElementById('bookTitle').textContent=c.title;renderLessons();document.getElementById('bookModal').classList.add('show')}
-function renderLessons(){let w=document.getElementById('lessons');w.innerHTML='';for(let i=0;i<activeCourse.lessons;i++){let k=activeCourse.id+'_'+i,on=!!completedLessons[k],d=document.createElement('div');d.className='task';d.style.background='#0f1832';d.style.color='#e8edff';d.innerHTML=`<div style="font-size:13px">الدرس ${i+1}</div><button class="check ${on?'on':''}" onclick="completeLesson('${k}')">${on?'✓':''}</button>`;w.appendChild(d)}}
-function completeLesson(k){completedLessons[k]=!completedLessons[k];saveLS('completed_lessons',completedLessons);renderLessons();playCheck()}
+function renderLessons(){let w=document.getElementById('lessons');w.innerHTML='';for(let i=0;i<activeCourse.lessons;i++){let k=activeCourse.id+'_'+i,on=!!completedLessons[k],d=document.createElement('div');d.className='lessonRow'+(on?' done':'');d.innerHTML=`<span>الدرس ${i+1}</span><button type="button" class="check ${on?'on':''}">${on?'✓':''}</button>`;d.onclick=()=>completeLesson(k);w.appendChild(d)}}
+function completeLesson(k){completedLessons[k]=!completedLessons[k];saveLS('completed_lessons',completedLessons);renderLessons();renderBooks();if(completedLessons[k])playCheck()}
 
 /* ==================== navigation ==================== */
 function showPage(page){
@@ -316,7 +365,140 @@ function showPage(page){
 }
 function goBack(){showPage('planning')}
 document.getElementById('startDate').addEventListener('change',()=>{if(!document.getElementById('extended').checked)document.getElementById('endDate').value=document.getElementById('startDate').value});
-renderPlanning();
+
+/* ==================== cloud: login + sync (Firebase) ==================== */
+/* الصق هنا إعدادات مشروعك من Firebase Console → Project settings → Your apps → Web app */
+const FIREBASE_CONFIG={
+ apiKey:"PASTE_API_KEY",
+ authDomain:"PASTE_PROJECT_ID.firebaseapp.com",
+ projectId:"PASTE_PROJECT_ID",
+ appId:"PASTE_APP_ID"
+};
+const EMPTY_SKILLS=()=>({reading:[],writing:[],listening:[],shadowing:[],speaking:[]});
+let auth=null,db=null,user=null,unsub=null,saveTimer=null,lastJSON='',authMode='in';
+function cloudReady(){return typeof firebase!=='undefined'&&FIREBASE_CONFIG.apiKey&&!/^PASTE/.test(FIREBASE_CONFIG.apiKey)}
+function $(id){return document.getElementById(id)}
+function getState(){return{tasks,skills,completedLessons,grammarStatus}}
+function setSync(st){
+ let b=$('syncBadge');if(!user){b.classList.add('hidden');return}
+ b.classList.remove('hidden','ok','err');
+ if(st==='ok'){b.textContent='☁ متزامن';b.classList.add('ok')}
+ else if(st==='err'){b.textContent='⚠ غير متزامن';b.classList.add('err')}
+ else b.textContent='… جارٍ الحفظ';
+}
+function scheduleSave(){
+ if(!user||!db)return;
+ clearTimeout(saveTimer);setSync('saving');
+ saveTimer=setTimeout(()=>{saveTimer=null;pushNow()},700);
+}
+function pushNow(){
+ if(!user||!db)return Promise.resolve();
+ const s=JSON.stringify(getState());lastJSON=s;setSync('saving');
+ return db.collection('users').doc(user.uid).set({data:s,updatedAt:firebase.firestore.FieldValue.serverTimestamp()})
+  .then(()=>setSync('ok')).catch(e=>{console.error(e);setSync('err')});
+}
+function applyState(d){
+ tasks=Array.isArray(d.tasks)?d.tasks:[];
+ skills=Object.assign(EMPTY_SKILLS(),d.skills||{});
+ completedLessons=d.completedLessons||{};
+ grammarStatus=d.grammarStatus||{currentRound:1,checkedBoxes:{}};
+ localStorage.setItem(TASK_KEY,JSON.stringify(tasks));
+ localStorage.setItem(SKILL_KEY,JSON.stringify(skills));
+ localStorage.setItem('completed_lessons',JSON.stringify(completedLessons));
+ localStorage.setItem('grammar_status',JSON.stringify(grammarStatus));
+ refreshAll();
+}
+function refreshAll(){
+ renderPlanning();
+ if(!$('booksPage').classList.contains('hidden'))renderBooks();
+ if(activeCourse&&$('bookModal').classList.contains('show'))renderLessons();
+ if(!$('skillsPage').classList.contains('hidden')&&currentSkill&&timerId===null)openSkill(currentSkill);
+}
+function startSync(){
+ const ref=db.collection('users').doc(user.uid);let first=true;
+ unsub=ref.onSnapshot(snap=>{
+  if(snap.metadata.hasPendingWrites)return;
+  if(!snap.exists){
+   if(snap.metadata.fromCache)return;      /* لا نرفع شيئًا قبل التأكد من السيرفر */
+   if(first){first=false;pushNow()}        /* أول دخول: نرفع بيانات هذا الجهاز الحالية */
+   return;
+  }
+  first=false;
+  const s=snap.data().data;
+  if(s===lastJSON){setSync('ok');return}
+  if(saveTimer)return;                     /* تعديل محلي لم يُرفع بعد، يفوز */
+  try{applyState(JSON.parse(s));lastJSON=s}catch(e){console.error(e)}
+  setSync('ok');
+ },err=>{console.error(err);setSync('err')});
+}
+function showAuthForm(){$('authScreen').classList.remove('hidden');$('authLoading').classList.add('hidden');$('authBox').classList.remove('hidden')}
+function onAuth(u){
+ if(!u){
+  user=null;if(unsub){unsub();unsub=null}
+  $('logoutBtn').classList.add('hidden');setSync();showAuthForm();return;
+ }
+ user=u;$('authScreen').classList.add('hidden');$('logoutBtn').classList.remove('hidden');
+ $('authPass').value='';$('authErr').textContent='';
+ renderPlanning();setSync('saving');startSync();
+}
+function setAuthMode(m){
+ authMode=m;$('tabIn').classList.toggle('on',m==='in');$('tabUp').classList.toggle('on',m==='up');
+ $('authBtn').textContent=m==='in'?'دخول':'إنشاء الحساب';
+ $('authPass').autocomplete=m==='in'?'current-password':'new-password';
+ $('forgotBtn').classList.toggle('hidden',m!=='in');$('authErr').textContent='';
+}
+const AUTH_ERR={
+ 'auth/invalid-email':'البريد الإلكتروني غير صحيح',
+ 'auth/user-not-found':'البريد أو كلمة المرور غير صحيحة',
+ 'auth/wrong-password':'البريد أو كلمة المرور غير صحيحة',
+ 'auth/invalid-credential':'البريد أو كلمة المرور غير صحيحة',
+ 'auth/invalid-login-credentials':'البريد أو كلمة المرور غير صحيحة',
+ 'auth/email-already-in-use':'هذا البريد مسجّل مسبقًا، استخدم تسجيل الدخول',
+ 'auth/weak-password':'كلمة المرور ضعيفة، استخدم 6 أحرف على الأقل',
+ 'auth/network-request-failed':'تعذّر الاتصال، تحقق من الإنترنت',
+ 'auth/too-many-requests':'محاولات كثيرة، حاول بعد قليل',
+ 'auth/operation-not-allowed':'فعّل Email/Password من إعدادات Firebase',
+ 'auth/missing-password':'أدخل كلمة المرور'
+};
+function authMsg(e){return AUTH_ERR[e.code]||('حدث خطأ: '+(e.code||e.message))}
+function authSubmit(){
+ const email=$('authEmail').value.trim(),pass=$('authPass').value,err=$('authErr'),btn=$('authBtn');
+ err.textContent='';
+ if(!email||!pass){err.textContent='أدخل البريد وكلمة المرور';return}
+ if(authMode==='up'&&pass.length<6){err.textContent='كلمة المرور 6 أحرف على الأقل';return}
+ btn.disabled=true;
+ const p=authMode==='up'?auth.createUserWithEmailAndPassword(email,pass):auth.signInWithEmailAndPassword(email,pass);
+ p.catch(e=>{err.textContent=authMsg(e)}).finally(()=>{btn.disabled=false});
+}
+function forgotPassword(){
+ const email=$('authEmail').value.trim(),err=$('authErr');
+ if(!email){err.textContent='اكتب بريدك أولًا ثم اضغط «نسيت كلمة المرور»';return}
+ auth.sendPasswordResetEmail(email).then(()=>{err.style.color='#25aa78';err.textContent='أرسلنا رابط إعادة التعيين إلى بريدك';setTimeout(()=>{err.style.color=''},4000)})
+  .catch(e=>{err.textContent=authMsg(e)});
+}
+async function logout(){
+ if(!confirm('تسجيل الخروج من هذا الجهاز؟'))return;
+ stopSpeaking(true);
+ if(saveTimer){clearTimeout(saveTimer);saveTimer=null}
+ await pushNow();
+ if(unsub){unsub();unsub=null}
+ [TASK_KEY,SKILL_KEY,'completed_lessons','grammar_status'].forEach(k=>localStorage.removeItem(k));
+ tasks=[];skills=EMPTY_SKILLS();completedLessons={};grammarStatus={currentRound:1,checkedBoxes:{}};lastJSON='';
+ await auth.signOut();
+ showPage('planning');
+}
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&saveTimer){clearTimeout(saveTimer);saveTimer=null;pushNow()}});
+
+if(cloudReady()){
+ $('authScreen').classList.remove('hidden');
+ firebase.initializeApp(FIREBASE_CONFIG);
+ auth=firebase.auth();db=firebase.firestore();
+ auth.onAuthStateChanged(onAuth);
+ setTimeout(()=>{if(!$('authScreen').classList.contains('hidden')&&$('authBox').classList.contains('hidden'))showAuthForm()},8000);
+}else{
+ console.warn('Firebase غير مُعدّ: التطبيق يعمل محليًا فقط على هذا الجهاز.');
+ renderPlanning();
+}
 </script>
 </body>
 </html>
