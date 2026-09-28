@@ -369,10 +369,12 @@ document.getElementById('startDate').addEventListener('change',()=>{if(!document
 /* ==================== cloud: login + sync (Firebase) ==================== */
 /* الصق هنا إعدادات مشروعك من Firebase Console → Project settings → Your apps → Web app */
 const FIREBASE_CONFIG={
- apiKey:"PASTE_API_KEY",
- authDomain:"PASTE_PROJECT_ID.firebaseapp.com",
- projectId:"PASTE_PROJECT_ID",
- appId:"PASTE_APP_ID"
+ apiKey:"AIzaSyCVaJ-CYcULY-mIQ43hA8jyll41pocj-Sc",
+ authDomain:"my-english-4f005.firebaseapp.com",
+ projectId:"my-english-4f005",
+ storageBucket:"my-english-4f005.firebasestorage.app",
+ messagingSenderId:"834597371899",
+ appId:"1:834597371899:web:2ca2befbd652a65fd5d55e"
 };
 const EMPTY_SKILLS=()=>({reading:[],writing:[],listening:[],shadowing:[],speaking:[]});
 let auth=null,db=null,user=null,unsub=null,saveTimer=null,lastJSON='',authMode='in';
@@ -489,15 +491,25 @@ async function logout(){
 }
 document.addEventListener('visibilitychange',()=>{if(document.hidden&&saveTimer){clearTimeout(saveTimer);saveTimer=null;pushNow()}});
 
+function showCloudProblem(msg){
+ let d=document.createElement('div');
+ d.style.cssText='position:fixed;top:0;left:0;right:0;z-index:400;pointer-events:none;background:#e96674;color:#fff;padding:10px 14px;font-size:12px;text-align:center;line-height:1.7';
+ d.textContent='⚠ تسجيل الدخول غير مفعّل: '+msg;document.body.appendChild(d);
+}
 if(cloudReady()){
- $('authScreen').classList.remove('hidden');
- firebase.initializeApp(FIREBASE_CONFIG);
- auth=firebase.auth();db=firebase.firestore();
- auth.onAuthStateChanged(onAuth);
- setTimeout(()=>{if(!$('authScreen').classList.contains('hidden')&&$('authBox').classList.contains('hidden'))showAuthForm()},8000);
+ try{
+  $('authScreen').classList.remove('hidden');
+  firebase.initializeApp(FIREBASE_CONFIG);
+  auth=firebase.auth();db=firebase.firestore();
+  auth.onAuthStateChanged(onAuth,e=>{showAuthForm();showCloudProblem(authMsg(e))});
+  setTimeout(()=>{if(!$('authScreen').classList.contains('hidden')&&$('authBox').classList.contains('hidden'))showAuthForm()},8000);
+ }catch(e){
+  console.error(e);$('authScreen').classList.add('hidden');renderPlanning();showCloudProblem('خطأ في إعداد Firebase ('+(e.message||e)+')');
+ }
 }else{
- console.warn('Firebase غير مُعدّ: التطبيق يعمل محليًا فقط على هذا الجهاز.');
  renderPlanning();
+ if(typeof firebase==='undefined')showCloudProblem('تعذّر تحميل مكتبة Firebase (تحقق من الإنترنت أو من حجب الإعلانات)');
+ else showCloudProblem('لم تُستبدل قيم FIREBASE_CONFIG في الملف بعد (ما زالت PASTE_...)');
 }
 </script>
 </body>
